@@ -1,0 +1,4 @@
+[ 45%]: cache compiling.release src\vulkan_runtime.cpp
+[ 49%]: cache compiling.release src\renderer.cpp
+[ 79%]: linking.release RTerminal.exe
+[100%]: build ok, spent 3.219s

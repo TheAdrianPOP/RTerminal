@@ -1,0 +1,91 @@
+{
+    tool_target_RTerminal_windows_x64_sh = {
+        program = [[C:\msys64\mingw64\bin\x86_64-w64-mingw32-g++]],
+        toolchain_info = {
+            cachekey = "mingw_arch_x64_plat_windows",
+            name = "mingw",
+            arch = "x64",
+            plat = "windows"
+        },
+        toolname = "gxx"
+    },
+    tool_target_RTerminal_windows_x64_ld = {
+        program = [[C:\msys64\mingw64\bin\x86_64-w64-mingw32-g++]],
+        toolchain_info = {
+            cachekey = "mingw_arch_x64_plat_windows",
+            name = "mingw",
+            arch = "x64",
+            plat = "windows"
+        },
+        toolname = "gxx"
+    },
+    tool_target_spv2h_windows_x64_ld = {
+        program = [[C:\msys64\mingw64\bin\x86_64-w64-mingw32-g++]],
+        toolchain_info = {
+            cachekey = "mingw_arch_x64_plat_windows",
+            name = "mingw",
+            arch = "x64",
+            plat = "windows"
+        },
+        toolname = "gxx"
+    },
+    tool_target_spv2h_windows_x64_cc = {
+        program = [[C:\msys64\mingw64\bin\x86_64-w64-mingw32-gcc]],
+        toolname = "gcc",
+        toolchain_info = {
+            arch = "x64",
+            name = "mingw",
+            cachekey = "mingw_arch_x64_plat_windows",
+            plat = "windows"
+        }
+    },
+    tool_target_spv2h_windows_x64_sh = {
+        program = [[C:\msys64\mingw64\bin\x86_64-w64-mingw32-g++]],
+        toolchain_info = {
+            cachekey = "mingw_arch_x64_plat_windows",
+            name = "mingw",
+            arch = "x64",
+            plat = "windows"
+        },
+        toolname = "gxx"
+    },
+    mingw_arch_x64_plat_windows = {
+        bindir = [[C:\msys64\mingw64\bin]],
+        cross = "x86_64-w64-mingw32-",
+        plat = "windows",
+        mingw = [[C:\msys64\mingw64]],
+        __global = true,
+        arch = "x64",
+        __checked = true
+    },
+    tool_target_RTerminal_windows_x64_cxx = {
+        program = [[C:\msys64\mingw64\bin\x86_64-w64-mingw32-g++]],
+        toolchain_info = {
+            cachekey = "mingw_arch_x64_plat_windows",
+            name = "mingw",
+            arch = "x64",
+            plat = "windows"
+        },
+        toolname = "gxx"
+    },
+    tool_target_RTerminal_windows_x64_cc = {
+        program = [[C:\msys64\mingw64\bin\x86_64-w64-mingw32-gcc]],
+        toolname = "gcc",
+        toolchain_info = {
+            arch = "x64",
+            name = "mingw",
+            cachekey = "mingw_arch_x64_plat_windows",
+            plat = "windows"
+        }
+    },
+    tool_target_spv2h_windows_x64_cxx = {
+        program = [[C:\msys64\mingw64\bin\x86_64-w64-mingw32-g++]],
+        toolchain_info = {
+            cachekey = "mingw_arch_x64_plat_windows",
+            name = "mingw",
+            arch = "x64",
+            plat = "windows"
+        },
+        toolname = "gxx"
+    }
+}
