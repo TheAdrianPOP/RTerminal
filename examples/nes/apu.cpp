@@ -1,0 +1,588 @@
+#include "apu.hpp"
+#include "cpu.hpp"
+#include "ppu.hpp"
+#include "nes.hpp"
+#include "save_state.hpp"
+
+#include <cstring>
+
+using namespace cynes;
+
+constexpr uint8_t LENGTH_COUNTER_TABLE[0x20] = {
+    0x0A, 0xFE, 0x14, 0x02, 0x28, 0x04, 0x50, 0x06,
+    0xA0, 0x08, 0x3C, 0x0A, 0x0E, 0x0C, 0x1A, 0x0E,
+    0x0C, 0x10, 0x18, 0x12, 0x30, 0x14, 0x60, 0x16,
+    0xC0, 0x18, 0x48, 0x1A, 0x10, 0x1C, 0x20, 0x1E
+};
+
+constexpr uint16_t PERIOD_DMC_TABLE[0x10] = {
+    0x1AC, 0x17C, 0x154, 0x140, 0x11E, 0x0FE, 0x0E2, 0x0D6,
+    0x0BE, 0x0A0, 0x08E, 0x080, 0x06A, 0x054, 0x048, 0x036
+};
+
+
+APU::APU(NES& nes)
+    : _nes{nes}
+    , _latch_cycle{false}
+    , _delay_dma{0x00}
+    , _address_dma{0x00}
+    , _pending_dma{false}
+    , _internal_open_bus{0x00}
+    , _frame_counter_clock{0x0000}
+    , _delay_frame_reset{0x0000}
+    , _channels_counters{}
+    , _channel_enabled{}
+    , _channel_halted{}
+    , _pre_clock_counter_status{}
+    , _during_length_clock{false}
+    , _step_mode{false}
+    , _inhibit_frame_interrupt{false}
+    , _send_frame_interrupt{false}
+    , _delta_channel_remaining_bytes{0x0000}
+    , _delta_channel_sample_length{0x0000}
+    , _delta_channel_period_counter{0x0000}
+    , _delta_channel_period_load{0x0000}
+    , _delta_channel_bits_in_buffer{0x00}
+    , _delta_channel_should_loop{false}
+    , _delta_channel_enable_interrupt{false}
+    , _delta_channel_sample_buffer_empty{false}
+    , _enable_dmc{false}
+    , _send_delta_channel_interrupt{false}
+{
+    memset(_channels_counters, 0x00, 4);
+    memset(_pre_clock_counter_status, false, 4);
+    memset(_channel_enabled, false, 4);
+    memset(_channel_halted, false, 4);
+}
+
+void APU::power() {
+    _latch_cycle = false;
+    _delay_dma = 0x00;
+    _address_dma = 0x00;
+    _pending_dma = false;
+    _internal_open_bus = 0x00;
+    _frame_counter_clock = 0x0000;
+    _delay_frame_reset = 0x0000;
+
+    memset(_channels_counters, 0x00, 4);
+    memset(_pre_clock_counter_status, false, 4);
+    memset(_channel_enabled, false, 4);
+    memset(_channel_halted, false, 4);
+
+    _during_length_clock = false;
+    _step_mode = false;
+    _inhibit_frame_interrupt = false;
+    _send_frame_interrupt = false;
+    _delta_channel_remaining_bytes = 0x0000;
+    _delta_channel_sample_length = 0x0000;
+    _delta_channel_period_counter = PERIOD_DMC_TABLE[0];
+    _delta_channel_period_load = PERIOD_DMC_TABLE[0];
+    _delta_channel_bits_in_buffer = 0x08;
+    
+    _dmc_address = 0xC000;
+    _dmc_output_level = 0;
+    _dmc_silence = true;
+    _dmc_bits_remaining = 8;
+
+    _delta_channel_should_loop = false;
+    _delta_channel_enable_interrupt = false;
+    _delta_channel_sample_buffer_empty = true;
+    _enable_dmc = false;
+    _send_delta_channel_interrupt = false;
+}
+
+void APU::reset() {
+    _enable_dmc = false;
+
+    memset(_channels_counters, 0x00, 4);
+    memset(_channel_enabled, false, 4);
+
+    _latch_cycle = false;
+    _delay_dma = 0x00;
+    _send_frame_interrupt = false;
+    _send_delta_channel_interrupt = false;
+    _delta_channel_period_counter = PERIOD_DMC_TABLE[0];
+    _delta_channel_period_load = PERIOD_DMC_TABLE[0];
+    _delta_channel_remaining_bytes = 0;
+    _delta_channel_sample_buffer_empty = true;
+    _delta_channel_bits_in_buffer = 8;
+
+    _nes.write(0x4015, 0x00);
+    _nes.write(0x4017, _step_mode << 7 | _inhibit_frame_interrupt << 6);
+}
+
+void APU::tick(bool reading, bool prevent_load) {
+    if (reading) {
+        perform_pending_dma();
+    }
+
+    _latch_cycle = !_latch_cycle;
+
+    _during_length_clock = false;
+
+    if (_step_mode) {
+        if (_delay_frame_reset > 0 && --_delay_frame_reset == 0) {
+            _frame_counter_clock = 0;
+        } else if (++_frame_counter_clock == 37282) {
+            _frame_counter_clock = 0;
+        }
+
+        if (_frame_counter_clock == 14912 || _frame_counter_clock == 37280) {
+            for (uint8_t channel = 0; channel < 0x4; channel++) {
+                _pre_clock_counter_status[channel] = _channels_counters[channel] > 0;
+            }
+
+            _during_length_clock = true;
+            update_counters();
+            clock_sweeps();
+        }
+        
+        if (_frame_counter_clock == 7456 || _frame_counter_clock == 14912 || 
+            _frame_counter_clock == 22368 || _frame_counter_clock == 37280) {
+            clock_envelopes();
+            clock_linear_counter();
+        }
+    } else {
+        if (_delay_frame_reset > 0 && --_delay_frame_reset == 0) {
+            _frame_counter_clock = 0;
+        } else if (++_frame_counter_clock == 29830) {
+            _frame_counter_clock = 0;
+
+            if (!_inhibit_frame_interrupt) {
+                set_frame_interrupt(true);
+            }
+        }
+
+        if (_frame_counter_clock == 14912 || _frame_counter_clock == 29828) {
+            for (uint8_t channel = 0; channel < 0x4; channel++) {
+                _pre_clock_counter_status[channel] = _channels_counters[channel] > 0;
+            }
+
+            _during_length_clock = true;
+            update_counters();
+            clock_sweeps();
+        }
+
+        if (_frame_counter_clock == 7456 || _frame_counter_clock == 14912 || 
+            _frame_counter_clock == 22368 || _frame_counter_clock == 29828) {
+            clock_envelopes();
+            clock_linear_counter();
+        }
+
+        if (_frame_counter_clock >= 29828 && !_inhibit_frame_interrupt) {
+            set_frame_interrupt(true);
+        }
+    }
+
+    _delta_channel_period_counter--;
+
+    if (_delta_channel_period_counter == 0) {
+        _delta_channel_period_counter = _delta_channel_period_load;
+        
+        // DMC Output Unit
+        if (!_dmc_silence) {
+            if (_dmc_shift_register & 1) {
+                if (_dmc_output_level <= 125) _dmc_output_level += 2;
+            } else {
+                if (_dmc_output_level >= 2) _dmc_output_level -= 2;
+            }
+            _dmc_shift_register >>= 1;
+        }
+        
+        _dmc_bits_remaining--;
+        if (_dmc_bits_remaining == 0) {
+            _dmc_bits_remaining = 8;
+            if (_delta_channel_sample_buffer_empty) {
+                _dmc_silence = true;
+            } else {
+                _dmc_silence = false;
+                _dmc_shift_register = _dmc_sample_buffer;
+                _delta_channel_sample_buffer_empty = true;
+            }
+        }
+
+        if (_delta_channel_remaining_bytes > 0 && !prevent_load && _delta_channel_sample_buffer_empty) {
+            load_delta_channel_byte(reading);
+        }
+    }
+}
+
+void APU::write(uint8_t address, uint8_t value) {
+    if (address < 0x20) regs[address] = value;
+    switch (static_cast<Register>(address)) {
+    case Register::PULSE_1_0: {
+        _channel_halted[0x0] = value & 0x20;
+        _envelopes[0].constant = value & 0x10;
+        _envelopes[0].loop = value & 0x20;
+        break;
+    }
+    case Register::PULSE_1_1: {
+        _sweeps[0].enabled = value & 0x80;
+        _sweeps[0].period = (value >> 4) & 0x7;
+        _sweeps[0].negate = value & 0x08;
+        _sweeps[0].shift = value & 0x07;
+        _sweeps[0].reload = true;
+        break;
+    }
+    case Register::PULSE_1_3: {
+        if (_channel_enabled[0x0] && !(_during_length_clock && _channels_counters[0x0] > 0)) {
+            _channels_counters[0x0] = LENGTH_COUNTER_TABLE[value >> 3];
+        }
+        _envelopes[0].start = true;
+        break;
+    }
+
+    case Register::PULSE_2_0: {
+        _channel_halted[0x1] = value & 0x20;
+        _envelopes[1].constant = value & 0x10;
+        _envelopes[1].loop = value & 0x20;
+        break;
+    }
+    case Register::PULSE_2_1: {
+        _sweeps[1].enabled = value & 0x80;
+        _sweeps[1].period = (value >> 4) & 0x7;
+        _sweeps[1].negate = value & 0x08;
+        _sweeps[1].shift = value & 0x07;
+        _sweeps[1].reload = true;
+        break;
+    }
+    case Register::PULSE_2_3: {
+        if (_channel_enabled[0x1] && !(_during_length_clock && _channels_counters[0x1] > 0)) {
+            _channels_counters[0x1] = LENGTH_COUNTER_TABLE[value >> 3];
+        }
+        _envelopes[1].start = true;
+        break;
+    }
+
+    case Register::TRIANGLE_0: {
+        _channel_halted[0x2] = value & 0x80;
+        break;
+    }
+    case Register::TRIANGLE_3: {
+        if (_channel_enabled[0x2] && !(_during_length_clock && _channels_counters[0x2] > 0)) {
+            _channels_counters[0x2] = LENGTH_COUNTER_TABLE[value >> 3];
+        }
+        _tri_reload_flag = true;
+        break;
+    }
+
+    case Register::NOISE_0: {
+        _channel_halted[0x3] = value & 0x20;
+        _envelopes[2].constant = value & 0x10;
+        _envelopes[2].loop = value & 0x20;
+        break;
+    }
+    case Register::NOISE_3: {
+        if (_channel_enabled[0x3] && !(_during_length_clock && _channels_counters[0x3] > 0)) {
+            _channels_counters[0x3] = LENGTH_COUNTER_TABLE[value >> 3];
+        }
+        _envelopes[2].start = true;
+        break;
+    }
+
+    case Register::OAM_DMA: {
+        perform_dma(value);
+        break;
+    }
+
+    case Register::DELTA_0: {
+        _delta_channel_enable_interrupt = value & 0x80;
+        _delta_channel_should_loop = value & 0x40;
+        _delta_channel_period_load = PERIOD_DMC_TABLE[value & 0x0F];
+        if (!_delta_channel_enable_interrupt) set_delta_interrupt(false);
+        break;
+    }
+    case Register::DELTA_1: {
+        _dmc_output_level = value & 0x7F;
+        break;
+    }
+    case Register::DELTA_2: {
+        _dmc_address = 0xC000 | (value << 6);
+        break;
+    }
+    case Register::DELTA_3: {
+        _delta_channel_sample_length = (value << 4) + 1;
+        break;
+    }
+
+    case Register::CTRL_STATUS: {
+        _enable_dmc = value & 0x10;
+        _internal_open_bus = value;
+        for (uint8_t channel = 0; channel < 0x4; channel++) {
+            _channel_enabled[channel] = value & (1 << channel);
+            if (!_channel_enabled[channel]) _channels_counters[channel] = 0;
+        }
+        set_delta_interrupt(false);
+        if (!_enable_dmc) {
+            _delta_channel_remaining_bytes = 0;
+        } else if (_delta_channel_remaining_bytes == 0) {
+            _delta_channel_remaining_bytes = _delta_channel_sample_length;
+            if (_delta_channel_sample_buffer_empty) load_delta_channel_byte(false);
+        }
+        break;
+    }
+
+    case Register::FRAME_COUNTER: {
+        _step_mode = value & 0x80;
+        _inhibit_frame_interrupt = value & 0x40;
+        if (_inhibit_frame_interrupt) set_frame_interrupt(false);
+        _delay_frame_reset = _latch_cycle ? 4 : 3;
+        if (_step_mode) {
+            clock_envelopes();
+            clock_sweeps();
+            clock_linear_counter();
+        }
+        break;
+    }
+    }
+}
+
+// Since $4015 is an internal CPU registers, its open bus behavior is a bit different.
+// See https://www.nesdev.org/wiki/APU#Status_($4015).
+uint8_t APU::read(uint8_t address) {
+    if (static_cast<Register>(address) == Register::CTRL_STATUS) {
+        _internal_open_bus = _send_delta_channel_interrupt << 7;
+        _internal_open_bus |= _send_frame_interrupt << 6;
+        _internal_open_bus |= (_delta_channel_remaining_bytes > 0) << 4;
+
+        for (uint8_t channel = 0; channel < 0x4; channel++) {
+            if (_during_length_clock) {
+                _internal_open_bus |= _pre_clock_counter_status[channel] << channel;
+            } else {
+                _internal_open_bus |= (_channels_counters[channel] > 0) << channel;
+            }
+        }
+
+        set_frame_interrupt(false);
+
+        return _internal_open_bus;
+    }
+
+    return _nes.get_open_bus();
+}
+
+void APU::stream_state(SaveState& save_state) {
+    save_state.stream(_latch_cycle);
+    save_state.stream(_delay_dma);
+    save_state.stream(_address_dma);
+    save_state.stream(_pending_dma);
+
+    save_state.stream(_frame_counter_clock);
+    save_state.stream(_delay_frame_reset);
+    save_state.stream(_channels_counters);
+    save_state.stream(_pre_clock_counter_status);
+    save_state.stream(_channel_enabled);
+    save_state.stream(_channel_halted);
+    save_state.stream(_during_length_clock);
+    save_state.stream(_step_mode);
+    save_state.stream(_inhibit_frame_interrupt);
+    save_state.stream(_send_frame_interrupt);
+
+    save_state.stream(_delta_channel_remaining_bytes);
+    save_state.stream(_delta_channel_sample_length);
+    save_state.stream(_delta_channel_period_counter);
+    save_state.stream(_delta_channel_period_load);
+    save_state.stream(_delta_channel_bits_in_buffer);
+    save_state.stream(_delta_channel_should_loop);
+    save_state.stream(_delta_channel_enable_interrupt);
+    save_state.stream(_delta_channel_sample_buffer_empty);
+    save_state.stream(_enable_dmc);
+    save_state.stream(_send_delta_channel_interrupt);
+}
+
+void APU::update_counters() {
+    for (uint8_t channel = 0; channel < 0x4; channel++) {
+        if (!_channel_halted[channel] && _channels_counters[channel] > 0) {
+            _channels_counters[channel]--;
+        }
+    }
+}
+
+void APU::load_delta_channel_byte(bool reading) {
+    uint8_t delay = _delay_dma;
+
+    if (delay == 0) {
+        if (reading) {
+            delay = 0x4;
+        } else {
+            delay = 0x3;
+        }
+    }
+
+    for (uint8_t i = 0; i < delay; i++) {
+        tick(false, true);
+
+        _nes.ppu.tick();
+        _nes.ppu.tick();
+        _nes.ppu.tick();
+        _nes.cpu.poll();
+    }
+
+    _dmc_sample_buffer = _nes.read(_dmc_address++);
+    if (_dmc_address == 0) _dmc_address = 0x8000;
+
+    _delta_channel_sample_buffer_empty = false;
+    _delta_channel_remaining_bytes--;
+
+    if (_delta_channel_remaining_bytes == 0) {
+        if (_delta_channel_should_loop) {
+            _delta_channel_remaining_bytes = _delta_channel_sample_length;
+        } else if (_delta_channel_enable_interrupt) {
+            set_delta_interrupt(true);
+        }
+    }
+}
+
+void APU::perform_dma(uint8_t address) {
+    _address_dma = address;
+    _pending_dma = true;
+}
+
+void APU::perform_pending_dma() {
+    if (!_pending_dma) {
+        return;
+    }
+
+    _pending_dma = false;
+    _delay_dma = 0x2;
+
+    if (!_latch_cycle) {
+        _nes.dummy_read();
+    }
+
+    _nes.dummy_read();
+
+    uint16_t current_address = _address_dma << 8;
+    uint8_t low_byte = 0x00;
+
+    _nes.write(0x2004, _nes.read(current_address++));
+
+    while ((low_byte = current_address & 0xFF) != 0) {
+        uint8_t value = _nes.read(current_address++);
+
+        if (low_byte == 254) {
+            _delay_dma = 0x1;
+            _nes.write(0x2004, value);
+            _delay_dma = 0x2;
+        } else if (low_byte == 255) {
+            _delay_dma = 0x3;
+            _nes.write(0x2004, value);
+            _delay_dma = 0x0;
+        } else {
+            _nes.write(0x2004, value);
+        }
+    }
+}
+
+void APU::set_frame_interrupt(bool interrupt) {
+    _send_frame_interrupt = interrupt;
+    _nes.cpu.set_frame_interrupt(interrupt);
+}
+
+void APU::set_delta_interrupt(bool interrupt) {
+    _send_delta_channel_interrupt = interrupt;
+    _nes.cpu.set_delta_interrupt(interrupt);
+}
+
+bool APU::is_channel_active(uint8_t channel) const {
+    if (channel < 4) return _channels_counters[channel] > 0;
+    if (channel == 4) return _delta_channel_remaining_bytes > 0;
+    return false;
+}
+
+uint8_t APU::get_volume(uint8_t channel) const {
+    if (channel == 2) {
+        // Triangle uses linear counter and length counter for gating, but output is full range.
+        if (_channels_counters[2] == 0 || _tri_linear_counter == 0) return 0;
+        return 15; 
+    }
+    if (channel == 4) return _dmc_output_level;
+    uint8_t idx = (channel == 3) ? 2 : channel;
+    if (_envelopes[idx].constant) return regs[channel*4] & 0x0F;
+    return _envelopes[idx].volume;
+}
+
+uint16_t APU::get_period(uint8_t channel) const {
+    uint16_t p = regs[channel*4+2] | ((regs[channel*4+3] & 0x07) << 8);
+    // Sweeps for Pulse 1 & 2
+    if (channel < 2) {
+        uint16_t target = p;
+        int delta = p >> _sweeps[channel].shift;
+        if (_sweeps[channel].negate) {
+            target -= delta;
+            if (channel == 0) target--;
+        } else {
+            target += delta;
+        }
+        // Muting
+        if (p < 8 || target > 0x7FF) return 0;
+        return p; 
+    }
+    return p;
+}
+
+uint8_t APU::get_dmc_level() const {
+    return _dmc_output_level;
+}
+
+void APU::Envelope::clock(uint8_t v) {
+    if (start) {
+        start = false;
+        volume = 15;
+        divider = v;
+    } else {
+        if (divider == 0) {
+            divider = v;
+            if (volume > 0) {
+                volume--;
+            } else if (loop) {
+                volume = 15;
+            }
+        } else {
+            divider--;
+        }
+    }
+}
+
+void APU::clock_envelopes() {
+    _envelopes[0].clock(regs[0x00] & 0x0F);
+    _envelopes[1].clock(regs[0x04] & 0x0F);
+    _envelopes[2].clock(regs[0x0C] & 0x0F);
+}
+
+void APU::clock_sweeps() {
+    for (int i = 0; i < 2; i++) {
+        if (_sweeps[i].divider == 0 && _sweeps[i].enabled && _sweeps[i].shift > 0) {
+            uint16_t p = regs[i*4+2] | ((regs[i*4+3] & 0x07) << 8);
+            int delta = p >> _sweeps[i].shift;
+            uint16_t target = p;
+            if (_sweeps[i].negate) {
+                target -= delta;
+                if (i == 0) target--;
+            } else {
+                target += delta;
+            }
+            if (p >= 8 && target <= 0x7FF) {
+                regs[i*4+2] = target & 0xFF;
+                regs[i*4+3] = (regs[i*4+3] & 0xF8) | ((target >> 8) & 0x07);
+            }
+        }
+        if (_sweeps[i].divider == 0 || _sweeps[i].reload) {
+            _sweeps[i].divider = _sweeps[i].period;
+            _sweeps[i].reload = false;
+        } else {
+            _sweeps[i].divider--;
+        }
+    }
+}
+
+void APU::clock_linear_counter() {
+    if (_tri_reload_flag) {
+        _tri_linear_counter = regs[0x08] & 0x7F;
+    } else if (_tri_linear_counter > 0) {
+        _tri_linear_counter--;
+    }
+    if (!(_channel_halted[0x2])) {
+        _tri_reload_flag = false;
+    }
+}

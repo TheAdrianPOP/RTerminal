@@ -1,0 +1,676 @@
+#include "mapper.hpp"
+
+#include "cpu.hpp"
+#include "nes.hpp"
+#include "save_state.hpp"
+
+#include <cstdio>
+#include <cstdlib>
+
+using namespace cynes;
+
+// Removed random_bytes_engine
+
+
+Mapper::MemoryBank::MemoryBank()
+    : offset{0}, read_only{true}, mapped{false} {}
+
+Mapper::MemoryBank::MemoryBank(size_t offset, bool read_only)
+    : offset{offset}, read_only{read_only}, mapped{true} {}
+
+void Mapper::MemoryBank::stream_state(SaveState& save_state) {
+    save_state.stream(offset);
+    save_state.stream(read_only);
+    save_state.stream(mapped);
+}
+
+
+Mapper::Mapper(
+    NES& nes,
+    const ParsedMemory& metadata,
+    MirroringMode mode,
+    uint8_t size_cpu_ram,
+    uint8_t size_ppu_ram
+) : _nes{nes}
+  , _banks_prg{metadata.size_prg}
+  , _banks_chr{metadata.size_chr}
+  , _banks_cpu_ram{size_cpu_ram}
+  , _banks_ppu_ram{size_ppu_ram}
+  , _size_prg{static_cast<size_t>(_banks_prg) << 10}
+  , _size_chr{static_cast<size_t>(_banks_chr) << 10}
+  , _size_cpu_ram{static_cast<size_t>(_banks_cpu_ram) << 10}
+  , _size_ppu_ram{static_cast<size_t>(_banks_ppu_ram) << 10}
+  , _read_only_chr{metadata.read_only_chr}
+  , _memory{new uint8_t[_size_prg + _size_chr + _size_cpu_ram + _size_ppu_ram]{}}
+  , _banks_cpu{}
+  , _banks_ppu{}
+{
+    if (_size_prg > 0) {
+        memcpy(
+            _memory,
+            metadata.memory_prg,
+            _size_prg
+        );
+    }
+
+    if (_size_chr > 0) {
+        memcpy(
+            _memory + _size_prg,
+            metadata.memory_chr,
+            _size_chr
+        );
+    }
+
+    if (metadata.trainer != nullptr) {
+        memcpy(
+            _memory + _size_prg + _size_chr,
+            metadata.trainer,
+            0x200
+        );
+
+        for (size_t i = 0x200; i < _size_cpu_ram; ++i) {
+            _memory[_size_prg + _size_chr + i] = (uint8_t)(rand() & 0xFF);
+        }
+    } else {
+        for (size_t i = 0; i < _size_cpu_ram; ++i) {
+            _memory[_size_prg + _size_chr + i] = (uint8_t)(rand() & 0xFF);
+        }
+    }
+
+    if (_size_ppu_ram > 0) {
+        for (size_t i = 0; i < _size_ppu_ram; ++i) {
+            _memory[_size_prg + _size_chr + _size_cpu_ram + i] = (uint8_t)(rand() & 0xFF);
+        }
+    }
+
+    set_mirroring_mode(mode);
+}
+
+Mapper::~Mapper() { delete[] _memory; }
+
+Mapper* Mapper::load_mapper(
+    NES& nes,
+    const char* path_rom
+) {
+    FILE* file = fopen(path_rom, "rb");
+
+    if (!file) {
+        fprintf(stderr, "The file cannot be read.\n");
+        return nullptr;
+    }
+
+    uint32_t header;
+    if (fread(&header, sizeof(uint32_t), 1, file) != 1) {
+        fclose(file);
+        return nullptr;
+    }
+
+    if (header != 0x1A53454E) {
+        fprintf(stderr, "The specified file is not a NES ROM.\n");
+        fclose(file);
+        return nullptr;
+    }
+
+    uint8_t program_banks = (uint8_t)fgetc(file);
+    uint8_t character_banks = (uint8_t)fgetc(file);
+    uint8_t flag6 = (uint8_t)fgetc(file);
+    uint8_t flag7 = (uint8_t)fgetc(file);
+
+    fseek(file, 8, SEEK_CUR);
+
+    ParsedMemory metadata{};
+    metadata.size_prg = static_cast<uint16_t>(program_banks) << 4;
+    metadata.size_chr = static_cast<uint16_t>(character_banks) << 3;
+
+    if (flag6 & 0x04) {
+        metadata.trainer = new uint8_t[0x200]{};
+        fread(metadata.trainer, 1, 0x200, file);
+    }
+
+    if (metadata.size_prg > 0) {
+        size_t memory_size = static_cast<size_t>(metadata.size_prg) << 10;
+        metadata.memory_prg = new uint8_t[memory_size]{};
+        fread(metadata.memory_prg, 1, memory_size, file);
+    }
+
+    if (metadata.size_chr > 0) {
+        size_t memory_size = static_cast<size_t>(metadata.size_chr) << 10;
+        metadata.read_only_chr = true;
+        metadata.memory_chr = new uint8_t[memory_size]{};
+        fread(metadata.memory_chr, 1, memory_size, file);
+    } else {
+        metadata.size_chr = 8;
+        metadata.read_only_chr = false;
+        metadata.memory_chr = new uint8_t[0x2000]{};
+    }
+
+    fclose(file);
+
+    uint8_t mapper_index = (flag7 & 0xF0) | flag6 >> 4;
+
+    MirroringMode mode = (flag6 & 0x01) == 1
+        ? MirroringMode::VERTICAL
+        : MirroringMode::HORIZONTAL;
+
+    switch (mapper_index) {
+    case   0: return new NROM (nes, metadata, mode);
+    case   1: return new MMC1 (nes, metadata, mode);
+    case   2: return new UxROM(nes, metadata, mode);
+    case   3: return new CNROM(nes, metadata, mode);
+    case   4: return new MMC3 (nes, metadata, mode);
+    case   7: return new AxROM(nes, metadata);
+    case   9: return new MMC2 (nes, metadata, mode);
+    case  10: return new MMC4 (nes, metadata, mode);
+    case  66: return new GxROM(nes, metadata, mode);
+    case  71: return new UxROM(nes, metadata, mode);
+    default: break;
+    }
+
+    fprintf(stderr, "The mapped used by the ROM is currently not supported (mapper id: %d).\n", mapper_index);
+    return nullptr;
+}
+
+void Mapper::tick() { }
+
+void Mapper::write_cpu(uint16_t address, uint8_t value) {
+    const auto& bank = _banks_cpu[address >> 10];
+
+    if (!bank.read_only && bank.mapped) {
+        _memory[bank.offset + (address & 0x3FF)] = value;
+    }
+}
+
+void Mapper::write_ppu(uint16_t address, uint8_t value) {
+    const auto& bank = _banks_ppu[address >> 10];
+
+    if (!bank.read_only && bank.mapped) {
+        _memory[bank.offset + (address & 0x3FF)] = value;
+    }
+}
+
+uint8_t Mapper::read_cpu(uint16_t address) {
+    const auto& bank = _banks_cpu[address >> 10];
+
+    if (!bank.mapped) {
+        return _nes.get_open_bus();
+    }
+
+    return _memory[bank.offset + (address & 0x3FF)];
+}
+
+uint8_t Mapper::read_ppu(uint16_t address) {
+    const auto& bank = _banks_ppu[address >> 10];
+
+    if (!bank.mapped) {
+        return 0x00;
+    }
+
+    return _memory[bank.offset + (address & 0x3FF)];
+}
+
+void Mapper::map_bank_prg(uint8_t page, uint16_t address) {
+    _banks_cpu[page] = {
+        static_cast<size_t>(address << 10),
+        true
+    };
+}
+
+void Mapper::map_bank_prg(uint8_t page, uint8_t size, uint16_t address) {
+    for (uint8_t index = 0; index < size; index++) {
+        map_bank_prg(page + index, address + index);
+    }
+}
+
+void Mapper::map_bank_cpu_ram(uint8_t page, uint16_t address, bool read_only) {
+    _banks_cpu[page] = {
+        _size_prg + _size_chr + static_cast<size_t>(address << 10),
+        read_only
+    };
+}
+
+void Mapper::map_bank_cpu_ram(uint8_t page, uint8_t size, uint16_t address, bool read_only) {
+    for (uint8_t index = 0; index < size; index++) {
+        map_bank_cpu_ram(page + index, address + index, read_only);
+    }
+}
+
+void Mapper::map_bank_chr(uint8_t page, uint16_t address) {
+    _banks_ppu[page] = {
+        _size_prg + static_cast<size_t>(address << 10),
+        _read_only_chr
+    };
+}
+
+void Mapper::map_bank_chr(uint8_t page, uint8_t size, uint16_t address) {
+    for (uint8_t index = 0; index < size; index++) {
+        map_bank_chr(page + index, address + index);
+    }
+}
+
+void Mapper::map_bank_ppu_ram(uint8_t page, uint16_t address, bool read_only) {
+    _banks_ppu[page] = {
+        _size_prg + _size_chr + _size_cpu_ram + static_cast<size_t>(address << 10),
+        read_only
+    };
+}
+
+void Mapper::map_bank_ppu_ram(uint8_t page, uint8_t size, uint16_t address, bool read_only) {
+    for (uint8_t index = 0; index < size; index++) {
+        map_bank_ppu_ram(page + index, address + index, read_only);
+    }
+}
+
+void Mapper::unmap_bank_cpu(uint8_t page) {
+    _banks_cpu[page] = {};
+}
+
+void Mapper::unmap_bank_cpu(uint8_t page, uint8_t size) {
+    for (uint8_t index = 0; index < size; index++) {
+        unmap_bank_cpu(page + index);
+    }
+}
+
+void Mapper::set_mirroring_mode(MirroringMode mode) {
+    if (mode == MirroringMode::ONE_SCREEN_LOW) {
+        map_bank_ppu_ram(0x8, 0x00, false);
+        map_bank_ppu_ram(0x9, 0x00, false);
+        map_bank_ppu_ram(0xA, 0x00, false);
+        map_bank_ppu_ram(0xB, 0x00, false);
+    } else if (mode == MirroringMode::ONE_SCREEN_HIGH) {
+        map_bank_ppu_ram(0x8, 0x01, false);
+        map_bank_ppu_ram(0x9, 0x01, false);
+        map_bank_ppu_ram(0xA, 0x01, false);
+        map_bank_ppu_ram(0xB, 0x01, false);
+    } else if (mode == MirroringMode::VERTICAL) {
+        map_bank_ppu_ram(0x8, 0x2, 0x00, false);
+        map_bank_ppu_ram(0xA, 0x2, 0x00, false);
+    } else if (mode == MirroringMode::HORIZONTAL) {
+        map_bank_ppu_ram(0x8, 0x00, false);
+        map_bank_ppu_ram(0x9, 0x00, false);
+        map_bank_ppu_ram(0xA, 0x01, false);
+        map_bank_ppu_ram(0xB, 0x01, false);
+    }
+
+    mirror_ppu_banks(0x8, 0x4, 0xC);
+}
+
+void Mapper::mirror_cpu_banks(uint8_t page, uint8_t size, uint8_t mirror) {
+    for (uint8_t index = 0; index < size; index++) {
+        _banks_cpu[mirror + index] = _banks_cpu[page + index];
+    }
+}
+
+void Mapper::mirror_ppu_banks(uint8_t page, uint8_t size, uint8_t mirror) {
+    for (uint8_t index = 0; index < size; index++) {
+        _banks_ppu[mirror + index] = _banks_ppu[page + index];
+    }
+}
+
+void Mapper::stream_state(SaveState& save_state) {
+    for (uint8_t index_bank = 0x00; index_bank < 0x40; index_bank++) {
+        _banks_cpu[index_bank].stream_state(save_state);
+    }
+
+    for (uint8_t index_bank = 0x00; index_bank < 0x10; index_bank++) {
+        _banks_ppu[index_bank].stream_state(save_state);
+    }
+
+    if (!_read_only_chr) {
+        save_state.stream(_memory + _size_prg, _size_chr);
+    }
+
+    if (_size_cpu_ram) {
+        save_state.stream(_memory + _size_prg + _size_chr, _size_cpu_ram);
+    }
+
+    if (_size_ppu_ram) {
+        save_state.stream(_memory + _size_prg + _size_chr + _size_cpu_ram, _size_ppu_ram);
+    }
+}
+
+
+NROM::NROM(NES& nes, const ParsedMemory& metadata, MirroringMode mode)
+    : Mapper(nes, metadata, mode)
+{
+    map_bank_chr(0x0, 0x8, 0x0);
+
+    if (_banks_prg == 0x20) {
+        map_bank_prg(0x20, 0x20, 0x0);
+    } else {
+        map_bank_prg(0x20, 0x10, 0x0);
+        map_bank_prg(0x30, 0x10, 0x0);
+    }
+
+    map_bank_cpu_ram(0x18, 0x8, 0x0, false);
+}
+
+
+MMC1::MMC1(
+    NES& nes,
+    const ParsedMemory& metadata,
+    MirroringMode mode
+) : Mapper(nes, metadata, mode)
+  , _tick{0x00}
+  , _registers{}
+  , _register{0x00}
+  , _counter{0x00}
+{
+    memset(_registers, 0x00, 0x4);
+    _registers[0x0] = 0xC;
+
+    update_banks();
+}
+
+void MMC1::tick() {
+    if (_tick < 6) {
+        _tick++;
+    }
+}
+
+void MMC1::write_cpu(uint16_t address, uint8_t value) {
+    if (address < 0x8000) {
+        Mapper::write_cpu(address, value);
+    } else {
+        write_registers((address >> 13) & 0x03, value);
+    }
+}
+
+void MMC1::write_registers(uint8_t register_target, uint8_t value) {
+    if (_tick == 6) {
+        if (value & 0x80) {
+            _registers[0x0] |= 0xC;
+
+            update_banks();
+
+            _register = 0x00;
+            _counter = 0;
+        } else {
+            _register >>= 1;
+            _register |= (value & 0x1) << 4;
+
+            if (++_counter == 5) {
+                _registers[register_target] = _register;
+
+                update_banks();
+
+                _register = 0x00;
+                _counter = 0x00;
+            }
+        }
+    }
+
+    _tick = 0;
+}
+
+void MMC1::update_banks() {
+    switch (_registers[0x0] & 0x03) {
+    case 0: set_mirroring_mode(MirroringMode::ONE_SCREEN_LOW); break;
+    case 1: set_mirroring_mode(MirroringMode::ONE_SCREEN_HIGH); break;
+    case 2: set_mirroring_mode(MirroringMode::VERTICAL); break;
+    case 3: set_mirroring_mode(MirroringMode::HORIZONTAL); break;
+    }
+
+    if (_registers[0x0] & 0x10) {
+        map_bank_chr(0x0, 0x4, (_registers[0x1] & 0x1F) << 2);
+        map_bank_chr(0x4, 0x4, (_registers[0x2] & 0x1F) << 2);
+    } else {
+        map_bank_chr(0x0, 0x8, (_registers[0x1] & 0x1E) << 2);
+    }
+
+    if (_registers[0x0] & 0x08) {
+        if (_registers[0x0] & 0x04) {
+            map_bank_prg(0x20, 0x10, (_registers[0x3] & 0x0F) << 4);
+            map_bank_prg(0x30, 0x10, _banks_prg - 0x10);
+        } else {
+            map_bank_prg(0x20, 0x10, 0x0);
+            map_bank_prg(0x30, 0x10, (_registers[0x3] & 0xF) << 4);
+        }
+    } else {
+        map_bank_prg(0x20, 0x20, (_registers[0x3] & 0x0E) << 4);
+    }
+
+    bool read_only = _registers[0x3] & 0x10;
+    map_bank_cpu_ram(0x18, 0x8, 0x0, read_only);
+}
+
+void MMC1::stream_state(SaveState& save_state) {
+    Mapper::stream_state(save_state);
+    save_state.stream(_tick);
+    save_state.stream(_registers);
+    save_state.stream(_register);
+    save_state.stream(_counter);
+}
+
+
+UxROM::UxROM(NES& nes, const ParsedMemory& metadata, MirroringMode mode)
+    : Mapper(nes, metadata, mode, 0x0, 0x10)
+{
+    map_bank_prg(0x20, 0x10, 0x00);
+    map_bank_prg(0x30, 0x10, _banks_prg - 0x10);
+
+    map_bank_ppu_ram(0x0, 0x8, 0x02, false);
+}
+
+void UxROM::write_cpu(uint16_t address, uint8_t value) {
+    if (address < 0x8000) {
+        Mapper::write_cpu(address, value);
+    } else {
+        if (_nes.get_glitch_mode()) {
+            value &= read_cpu(address);
+        }
+        map_bank_prg(0x20, 0x10, value << 4);
+    }
+}
+
+
+CNROM::CNROM(NES& nes, const ParsedMemory& metadata, MirroringMode mode)
+    : Mapper(nes, metadata, mode, 0x0)
+{
+    map_bank_chr(0x0, 0x8, 0x0);
+
+    if (_banks_prg == 0x20) {
+        map_bank_prg(0x20, 0x20, 0x0);
+    } else {
+        map_bank_prg(0x20, 0x10, 0x0);
+        map_bank_prg(0x30, 0x10, 0x0);
+    }
+}
+
+void CNROM::write_cpu(uint16_t address, uint8_t value) {
+    if (address < 0x8000) {
+        Mapper::write_cpu(address, value);
+    } else {
+        if (_nes.get_glitch_mode()) {
+            value &= read_cpu(address);
+        }
+        map_bank_chr(0x0, 0x8, (value & 0x3) << 3);
+    }
+}
+
+
+MMC3::MMC3(
+    NES& nes,
+    const ParsedMemory& metadata,
+    MirroringMode mode
+) : Mapper(nes, metadata, mode)
+  , _tick{0x0000}
+  , _registers{}
+  , _counter{0x0000}
+  , _counter_reset_value{0x0000}
+  , _register_target{0x00}
+  , _mode_prg{false}
+  , _mode_chr{false}
+  , _enable_interrupt{false}
+  , _should_reload_interrupt{false}
+{
+    map_bank_chr(0x0, 0x8, 0x0);
+    map_bank_prg(0x20, 0x10, 0x0);
+    map_bank_prg(0x30, 0x10, _banks_prg - 0x10);
+    map_bank_cpu_ram(0x18, 0x8, 0x0, false);
+
+    memset(_registers, 0x0000, 0x20);
+}
+
+void MMC3::tick() {
+    if (_tick > 0 && _tick < 11) {
+        _tick++;
+    }
+}
+
+void MMC3::write_cpu(uint16_t address, uint8_t value) {
+    if (address < 0x8000) {
+        Mapper::write_cpu(address, value);
+    } else if (address < 0xA000) {
+        if (address & 0x1) {
+            if (_register_target < 2) {
+                value &= 0xFE;
+            }
+
+            _registers[_register_target] = value;
+
+            if (_mode_prg) {
+                map_bank_prg(0x20, 0x08, _banks_prg - 0x10);
+                map_bank_prg(0x28, 0x08, (_registers[0x7] & 0x3F) << 3);
+                map_bank_prg(0x30, 0x08, (_registers[0x6] & 0x3F) << 3);
+                map_bank_prg(0x38, 0x08, _banks_prg - 0x8);
+            } else {
+                map_bank_prg(0x20, 0x08, (_registers[0x6] & 0x3F) << 3);
+                map_bank_prg(0x28, 0x08, (_registers[0x7] & 0x3F) << 3);
+                map_bank_prg(0x30, 0x10, _banks_prg - 0x10);
+            }
+
+            if (_mode_chr) {
+                map_bank_chr(0x0, _registers[0x2]);
+                map_bank_chr(0x1, _registers[0x3]);
+                map_bank_chr(0x2, _registers[0x4]);
+                map_bank_chr(0x3, _registers[0x5]);
+                map_bank_chr(0x4, 0x2, _registers[0x0]);
+                map_bank_chr(0x6, 0x2, _registers[0x1]);
+            } else {
+                map_bank_chr(0x0, 0x2, _registers[0x0]);
+                map_bank_chr(0x2, 0x2, _registers[0x1]);
+                map_bank_chr(0x4, _registers[0x2]);
+                map_bank_chr(0x5, _registers[0x3]);
+                map_bank_chr(0x6, _registers[0x4]);
+                map_bank_chr(0x7, _registers[0x5]);
+            }
+        } else {
+            _register_target = value & 0x07;
+            _mode_prg = value & 0x40;
+            _mode_chr = value & 0x80;
+        }
+    } else if (address < 0xC000) {
+        if (address & 0x1) {
+            bool read_only = value & 0x40;
+            map_bank_cpu_ram(0x18, 0x8, 0x0, read_only);
+        } else  if (value & 0x1) {
+            set_mirroring_mode(MirroringMode::HORIZONTAL);
+        } else {
+            set_mirroring_mode(MirroringMode::VERTICAL);
+        }
+    } else if (address < 0xE000) {
+        if (address & 0x1) {
+            _counter = 0x0000;
+            _should_reload_interrupt = true;
+        } else {
+            _counter_reset_value = value;
+        }
+    } else {
+        if (address & 0x1) {
+            _enable_interrupt = true;
+        } else {
+            _enable_interrupt = false;
+            _nes.cpu.set_mapper_interrupt(false);
+        }
+    }
+}
+
+void MMC3::write_ppu(uint16_t address, uint8_t value) {
+    update_state(address & 0x1000);
+    Mapper::write_ppu(address, value);
+}
+
+uint8_t MMC3::read_ppu(uint16_t address) {
+    update_state(address & 0x1000);
+    return Mapper::read_ppu(address);
+}
+
+void MMC3::update_state(bool state) {
+    if (state) {
+        if (_tick > 10) {
+            if (_counter == 0 || _should_reload_interrupt) {
+                _counter = _counter_reset_value;
+            } else {
+                _counter--;
+            }
+
+            if (_counter == 0 && _enable_interrupt) {
+                _nes.cpu.set_mapper_interrupt(true);
+            }
+
+            _should_reload_interrupt = false;
+        }
+
+        _tick = 0;
+    } else if (_tick == 0) {
+        _tick = 1;
+    }
+}
+
+void MMC3::stream_state(SaveState& save_state) {
+    Mapper::stream_state(save_state);
+    save_state.stream(_tick);
+    save_state.stream(_registers);
+    save_state.stream(_counter);
+    save_state.stream(_counter_reset_value);
+    save_state.stream(_register_target);
+    save_state.stream(_mode_prg);
+    save_state.stream(_mode_chr);
+    save_state.stream(_enable_interrupt);
+    save_state.stream(_should_reload_interrupt);
+}
+
+
+AxROM::AxROM(NES& nes, const ParsedMemory& metadata)
+    : Mapper(nes, metadata, MirroringMode::ONE_SCREEN_LOW, 0x8, 0x10)
+{
+    map_bank_ppu_ram(0x0, 0x8, 0x2, false);
+    map_bank_prg(0x20, 0x20, 0x0);
+}
+
+void AxROM::write_cpu(uint16_t address, uint8_t value) {
+    if (address < 0x8000) {
+        Mapper::write_cpu(address, value);
+    } else {
+        if (_nes.get_glitch_mode()) {
+            value &= read_cpu(address);
+        }
+        map_bank_prg(0x20, 0x20, (value & 0x07) << 5);
+
+        if (value & 0x10) {
+            set_mirroring_mode(MirroringMode::ONE_SCREEN_HIGH);
+        } else {
+            set_mirroring_mode(MirroringMode::ONE_SCREEN_LOW);
+        }
+    }
+}
+
+
+GxROM::GxROM(NES& nes, const ParsedMemory& metadata, MirroringMode mode)
+    : Mapper(nes, metadata, mode, 0x0)
+{
+    map_bank_prg(0x20, 0x20, 0x0);
+    map_bank_chr(0x00, 0x08, 0x0);
+}
+
+void GxROM::write_cpu(uint16_t address, uint8_t value) {
+    if (address < 0x8000) {
+        Mapper::write_cpu(address, value);
+    } else {
+        if (_nes.get_glitch_mode()) {
+            value &= read_cpu(address);
+        }
+        map_bank_prg(0x20, 0x20, (value & 0x30) << 1);
+        map_bank_chr(0x00, 0x08, (value & 0x03) << 3);
+    }
+}
