@@ -1,7 +1,7 @@
 #pragma once
 
 #include "math_utils.h"
-#include <cstring>
+#include "internal.h"
 
 // Platform atomics — no <atomic> required.
 // Uses _Interlocked* on MSVC, __atomic_* builtins on GCC/Clang.
@@ -101,7 +101,10 @@ FORCE_INLINE void  store_f32(volatile int* p, float v, int order)       { int b;
 FORCE_INLINE bool  cmpxchg_f32(volatile int* p, float* exp, float des) {
     int eb; memcpy(&eb, exp, 4); int db; memcpy(&db, &des, 4);
     bool ok = __atomic_compare_exchange_n(p, &eb, db, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
-    if (!ok) memcpy(exp, &eb, 4); return ok;
+    if (!ok) {
+    memcpy(exp, &eb, 4);
+}
+return ok;
 }
 FORCE_INLINE size_t load_sz(const volatile size_t* p, int order)       { return __atomic_load_n(p, order); }
 FORCE_INLINE void   store_sz(volatile size_t* p, size_t v, int order)  { __atomic_store_n(p, v, order); }
@@ -132,9 +135,14 @@ struct alignas(4) AtomicBool {
     explicit AtomicBool(bool v) : val_(v ? 1 : 0) {}
     AtomicBool(const AtomicBool&) = delete;
     AtomicBool& operator=(const AtomicBool&) = delete;
-
     FORCE_INLINE void store(bool v, rt_mo::Order o = rt_mo::release)    { rt_atomic_impl::store_bool(&val_, v, o); }
     FORCE_INLINE bool load(rt_mo::Order o = rt_mo::acquire)       const  { return rt_atomic_impl::load_bool(&val_, o); }
+    FORCE_INLINE bool exchange(bool desired, rt_mo::Order = rt_mo::seq_cst) {
+        int expected = val_;
+        int desired_val = desired ? 1 : 0;
+        while (!rt_atomic_impl::cmpxchg_i32(&val_, &expected, desired_val));
+        return expected != 0;
+    }
 private:
     mutable volatile int val_;
 };

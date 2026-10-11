@@ -7,8 +7,8 @@
 
 #include "math_utils.h"
 #include "callback.h"
-#include "../math/vector.h"
-#include <cstdint>
+#include "vector.h"
+#include "internal.h"
 
 using TimerID = uint32_t;
 static constexpr TimerID kInvalidTimer = 0;
@@ -29,23 +29,44 @@ public:
         return add(delay, 0.f, 1, rt_move(cb));
     }
 
-    // Repeating: fire every 'interval' seconds; count=-1 means forever
+    // Repeating: fire every 'interval' seconds; count = -1 means forever
     TimerID every(float interval, VoidFn cb, int count = -1) {
         return add(interval, interval, count, rt_move(cb));
     }
 
     void cancel(TimerID id) {
-        for (auto& t : timers_)
+        for (auto& t : timers_) {
             if (t.id == id) { t.repeat = 0; return; }
+        }
+        for (auto& t : pending_added_) {
+            if (t.id == id) { t.repeat = 0; return; }
+        }
     }
-    void pause(TimerID id)  { for (auto& t : timers_) if (t.id==id) t.paused=true;  }
-    void resume(TimerID id) { for (auto& t : timers_) if (t.id==id) t.paused=false; }
-    void cancelAll()        { timers_.clear(); }
+
+    void pause(TimerID id) {
+        for (auto& t : timers_)        if (t.id == id) t.paused = true;
+        for (auto& t : pending_added_) if (t.id == id) t.paused = true;
+    }
+
+    void resume(TimerID id) {
+        for (auto& t : timers_)        if (t.id == id) t.paused = false;
+        for (auto& t : pending_added_) if (t.id == id) t.paused = false;
+    }
+
+    void cancelAll() {
+        timers_.clear();
+        pending_added_.clear();
+    }
 
     // Call each frame with frame delta time in seconds
     void update(float dt) {
-        for (auto& t : timers_) {
+        is_updating_ = true;
+        size_t count = timers_.size();
+
+        for (size_t i = 0; i < count; ++i) {
+            auto& t = timers_[i];
             if (t.repeat == 0 || t.paused) continue;
+
             t.delay -= dt;
             while (t.delay <= 0.f && t.repeat != 0) {
                 if (t.cb) t.cb();
@@ -54,32 +75,52 @@ public:
                 t.delay += (t.interval > 0.f ? t.interval : 1e9f);
             }
         }
-        // Remove expired (manual loop — avoids std::remove_if)
+        is_updating_ = false;
+
+        // Flush newly registered timers from callbacks
+        for (size_t i = 0; i < pending_added_.size(); ++i) {
+            timers_.push_back(rt_move(pending_added_[i]));
+        }
+        pending_added_.clear();
+
+        // Compact expired timers
         for (size_t i = 0; i < timers_.size(); ) {
-            if (timers_[i].repeat == 0)
+            if (timers_[i].repeat == 0) {
                 timers_.erase(timers_.begin() + i);
-            else
+            } else {
                 ++i;
+            }
         }
     }
 
-    size_t activeCount() const { return timers_.size(); }
+    size_t activeCount() const { return timers_.size() + pending_added_.size(); }
 
 private:
     TimerID add(float delay, float interval, int repeat, VoidFn cb) {
         TimerID id = ++nextId_;
         Timer t;
-        t.id = id; t.delay = delay; t.interval = interval;
-        t.repeat = repeat; t.paused = false; t.cb = rt_move(cb);
-        timers_.push_back(rt_move(t));
+        t.id       = id;
+        t.delay    = delay;
+        t.interval = interval;
+        t.repeat   = repeat;
+        t.paused   = false;
+        t.cb       = rt_move(cb);
+
+        if (is_updating_) {
+            pending_added_.push_back(rt_move(t));
+        } else {
+            timers_.push_back(rt_move(t));
+        }
         return id;
     }
 
     PodVector<Timer> timers_;
-    TimerID nextId_ = 0;
+    PodVector<Timer> pending_added_;
+    TimerID          nextId_      = 0;
+    bool             is_updating_ = false;
 };
 
 // Global singleton timer system
 inline TimerSystem& globalTimers() { static TimerSystem ts; return ts; }
 
-#endif
+#endif // TIMER_SYSTEM_H

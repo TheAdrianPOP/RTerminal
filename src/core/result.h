@@ -2,7 +2,7 @@
 #ifndef RESULT_H
 #define RESULT_H
 
-#include <cassert>
+#include "internal.h"
 #include "move.h"
 
 template<typename T, typename E = int>
@@ -48,7 +48,9 @@ public:
 
     Result& operator=(Result&& o) noexcept {
         if (this != &o) {
-            this->~Result();
+            if (is_ok_) value_.~T();
+            else        error_.~E();
+
             is_ok_ = o.is_ok_;
             if (is_ok_) new (&value_) T(rt_move(o.value_));
             else        new (&error_) E(rt_move(o.error_));
@@ -56,7 +58,7 @@ public:
         return *this;
     }
 
-    Result(const Result&) = delete;
+    Result(const Result&)            = delete;
     Result& operator=(const Result&) = delete;
 
     bool isOk()    const { return is_ok_; }
@@ -108,6 +110,13 @@ public:
         return res;
     }
 
+    static Result Error(const E& error) {
+        Result res;
+        new (&res.error_) E(error);
+        res.is_ok_ = false;
+        return res;
+    }
+
     ~Result() {
         if (!is_ok_) error_.~E();
     }
@@ -116,20 +125,42 @@ public:
         if (!is_ok_) new (&error_) E(rt_move(o.error_));
     }
 
+    Result& operator=(Result&& o) noexcept {
+        if (this != &o) {
+            if (!is_ok_) error_.~E();
+            is_ok_ = o.is_ok_;
+            if (!is_ok_) new (&error_) E(rt_move(o.error_));
+        }
+        return *this;
+    }
+
+    Result(const Result&)            = delete;
+    Result& operator=(const Result&) = delete;
+
     bool isOk()    const { return is_ok_; }
     bool isError() const { return !is_ok_; }
 
+    void unwrap() const {
+        assert(is_ok_ && "Called unwrap() on an Error result");
+    }
+
     E& error() {
-        assert(!is_ok_);
+        assert(!is_ok_ && "Called error() on an Ok result");
+        return error_;
+    }
+
+    const E& error() const {
+        assert(!is_ok_ && "Called error() on an Ok result");
         return error_;
     }
 
 private:
     Result() : is_ok_(false) {}
+
     union {
         E error_;
     };
     bool is_ok_;
 };
 
-#endif
+#endif // RESULT_H

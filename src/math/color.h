@@ -2,11 +2,8 @@
 #ifndef COLOR_H
 #define COLOR_H
 
-// Color math utilities.
-// Complements platform/console.h RGBColor with operations: lerp, alpha blend, HSV<->RGB, etc.
-
 #include "math_utils.h"
-#include "../platform/console.h"
+#include "console.h"
 #include <cstdint>
 #include <cstring>
 
@@ -20,7 +17,6 @@ struct Color {
     uint32_t toU32()     const { return ((uint32_t)r<<24)|((uint32_t)g<<16)|((uint32_t)b<<8)|a; }
     RGBColor toRGBColor()const { return RGBColor(r, g, b); }
 
-    // Alpha premultiplied blend: src over dst
     Color blendOver(Color dst) const {
         if (a == 0)   return dst;
         if (a == 255) return *this;
@@ -49,11 +45,10 @@ struct Color {
     bool operator!=(Color o) const { return toU32()!=o.toU32(); }
 };
 
-// HSV <-> RGB (all in [0,1] float range)
 struct ColorHSV { float h, s, v, a; };
 
 inline Color hsvToRgb(float h, float s, float v, float a = 1.0f) {
-    h = h - (float)(int)h;   // wrap 0..1
+    h = h - (float)(int)h;
     if (h < 0.f) h += 1.f;
     float c = v * s;
     float x = c * (1.f - fast_abs(h * 6.f - (float)(int)(h * 6.f) * 2.f - 1.f));
@@ -86,7 +81,6 @@ inline ColorHSV rgbToHsv(Color c) {
     return {h, s, v, c.a/255.f};
 }
 
-// Convenience palette
 namespace Palette {
     constexpr Color Black      {0,   0,   0  };
     constexpr Color White      {255, 255, 255};
@@ -102,4 +96,4 @@ namespace Palette {
     constexpr Color Transparent{0,   0,   0, 0};
 }
 
-#endif
+#endif // COLOR_H

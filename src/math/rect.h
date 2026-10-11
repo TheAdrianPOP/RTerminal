@@ -2,13 +2,10 @@
 #ifndef RECT_H
 #define RECT_H
 
-// 2D axis-aligned rectangle — integer and float variants.
-// Used for UI layout, collision, viewport clipping, tilemaps.
-
 #include "vector.h"
 
 struct Rect {
-    float x, y, w, h;  // top-left origin, positive width/height
+    float x, y, w, h;
 
     Rect() : x(0), y(0), w(0), h(0) {}
     Rect(float x, float y, float w, float h) : x(x), y(y), w(w), h(h) {}
@@ -46,7 +43,6 @@ struct Rect {
     FORCE_INLINE Rect translate(Vec2 d)  const { return {x+d.x, y+d.y, w, h}; }
     FORCE_INLINE Rect scale(float s)     const { return {x*s, y*s, w*s, h*s}; }
 
-    // Split rect into left/right by pixel x offset from left
     FORCE_INLINE Rect splitLeft(float px)  const { return {x,    y, px,   h}; }
     FORCE_INLINE Rect splitRight(float px) const { return {x+px, y, w-px, h}; }
     FORCE_INLINE Rect splitTop(float py)   const { return {x, y,    w, py};   }
@@ -56,7 +52,6 @@ struct Rect {
     bool operator!=(const Rect& o) const { return !(*this==o); }
 };
 
-// Integer rect — exact pixel regions, tile ranges
 struct Recti {
     int x, y, w, h;
 
@@ -93,4 +88,4 @@ struct Recti {
     bool operator!=(const Recti& o) const { return !(*this==o); }
 };
 
-#endif
+#endif // RECT_H

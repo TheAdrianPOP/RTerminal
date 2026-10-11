@@ -8,7 +8,7 @@
 // RefHandle<void> is the type-erased form used for heterogeneous storage.
 
 #include "move.h"
-#include <cstdlib>
+#include "internal.h"
 
 // ── Control block ─────────────────────────────────────────────────────────────
 struct RefBlock {

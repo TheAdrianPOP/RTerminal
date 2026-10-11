@@ -55,4 +55,4 @@ struct alignas(16) AABB {
     }
 };
 
-#endif
+#endif // AABB_H

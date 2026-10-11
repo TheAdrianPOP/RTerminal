@@ -4,13 +4,7 @@
 
 #ifndef _WIN32
 
-#include "runtime.h"
-#include <cstdio>
-#include <cstdlib>
-#include <cstdarg>
-#include <cstring>
-#include <new>
-#include <csignal>
+#include "internal.h"
 #include <unistd.h>
 
 // ── Signal handler ────────────────────────────────────────────────────────────

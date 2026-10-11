@@ -207,4 +207,4 @@ struct alignas(16) Mat4 {
     }
 };
 
-#endif
+#endif // MATRIX_H

@@ -1,4 +1,6 @@
 #pragma once
+#ifndef QUAT_H
+#define QUAT_H
 
 #include "math_utils.h"
 #include "vector.h"
@@ -148,3 +150,5 @@ struct alignas(16) Quat {
              + u.cross(v) * (2.f * s);
     }
 };
+
+#endif // QUAT_H

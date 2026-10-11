@@ -5,7 +5,6 @@
 #include "atomic.h"
 
 #ifdef _WIN32
-    #define WIN32_LEAN_AND_MEAN
     #ifndef NOMINMAX
         #define NOMINMAX
     #endif
@@ -15,79 +14,38 @@
     #include <unistd.h>   // sysconf(_SC_NPROCESSORS_ONLN)
 #endif
 
-#include <immintrin.h>
-
 constexpr int CACHE_LINE_SIZE = 64;
 constexpr int WORK_BATCH_SIZE = 8;
 constexpr int SPIN_LIMIT      = 400;
 
+class Thread {
+public:
+    using Func = void (*)(void*);
+    static void spawn(Func func, void* arg);
+};
+
 class ParallelExecutor {
 public:
-    explicit ParallelExecutor(size_t thread_count);
+    explicit ParallelExecutor(size_t thread_count = 0);
     ~ParallelExecutor();
 
     size_t getThreadCount() const noexcept { return threads_.size() + 1; }
 
     using JobFunc = void (*)(int, void*);
 
+    // OPTIMIZATION: Template only sets up the trampoline wrapper, 
+    // delegating the heavy platform-specific sync to runInternal.
     template<typename Func>
     void run(int count, Func&& func) {
         if (count <= 0) return;
         auto wrapper = +[](int index, void* userData) {
             (*static_cast<Func*>(userData))(index);
         };
-#ifdef _WIN32
-        EnterCriticalSection(&mutex_cs_);
-        current_job_func_  = wrapper;
-        current_user_data_ = static_cast<void*>(&func);
-        total_items_.store(count,   rt_mo::relaxed);
-        next_item_idx_.store(0,     rt_mo::relaxed);
-        active_workers_.store(0,    rt_mo::relaxed);
-        job_active_.store(true,     rt_mo::release);
-        LeaveCriticalSection(&mutex_cs_);
-        WakeAllConditionVariable(&cv_start_);
-#else
-        pthread_mutex_lock(&mutex_);
-        current_job_func_  = wrapper;
-        current_user_data_ = static_cast<void*>(&func);
-        total_items_.store(count,   rt_mo::relaxed);
-        next_item_idx_.store(0,     rt_mo::relaxed);
-        active_workers_.store(0,    rt_mo::relaxed);
-        job_active_.store(true,     rt_mo::release);
-        pthread_mutex_unlock(&mutex_);
-        pthread_cond_broadcast(&cv_start_);
-#endif
-
-        workerLoop(true);
-
-        int spin = 0;
-        while (job_active_.load(rt_mo::acquire) && spin++ < SPIN_LIMIT) {
-#if defined(__i386__) || defined(__x86_64__) || defined(_M_IX86) || defined(_M_X64)
-            _mm_pause();
-#elif defined(__aarch64__) || defined(_M_ARM64)
-            __asm__ __volatile__("yield" ::: "memory");
-#endif
-        }
-
-#ifdef _WIN32
-        if (job_active_.load(rt_mo::acquire) || active_workers_.load(rt_mo::acquire) > 0) {
-            EnterCriticalSection(&mutex_cs_);
-            while (job_active_.load(rt_mo::relaxed) || active_workers_.load(rt_mo::relaxed) > 0)
-                SleepConditionVariableCS(&cv_done_, &mutex_cs_, INFINITE);
-            LeaveCriticalSection(&mutex_cs_);
-        }
-#else
-        if (job_active_.load(rt_mo::acquire) || active_workers_.load(rt_mo::acquire) > 0) {
-            pthread_mutex_lock(&mutex_);
-            while (job_active_.load(rt_mo::relaxed) || active_workers_.load(rt_mo::relaxed) > 0)
-                pthread_cond_wait(&cv_done_, &mutex_);
-            pthread_mutex_unlock(&mutex_);
-        }
-#endif
+        runInternal(count, wrapper, static_cast<void*>(&func));
     }
 
 private:
-    void workerMain(int core_id);
+    void runInternal(int count, JobFunc wrapper, void* userData);
     void workerLoop(bool isMainThread);
 
 #ifdef _WIN32
@@ -96,14 +54,13 @@ private:
     CONDITION_VARIABLE  cv_start_;
     CONDITION_VARIABLE  cv_done_;
 
-    struct Win32ThreadArg { ParallelExecutor* self; int core_id; };
     static DWORD WINAPI win32ThreadProc(LPVOID param);
 #else
     PodVector<pthread_t>              threads_;
     alignas(CACHE_LINE_SIZE) pthread_mutex_t mutex_;
     pthread_cond_t                    cv_start_;
     pthread_cond_t                    cv_done_;
-    struct PthreadArg { ParallelExecutor* self; int core_id; };
+
     static void* pthreadProc(void* param);
 #endif
 

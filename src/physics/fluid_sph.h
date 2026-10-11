@@ -16,13 +16,15 @@ struct FluidSPHConfig {
     float min_density   = 0.001f;
 };
 
+// OPTIMIZATION: Converted FluidParticle into a trivially constructible structure.
+// This prevents the compiler from generating a massive loop inside FluidSPH's constructor.
 struct FluidParticle {
     Vec3  position;
     Vec3  velocity;
     Vec3  accel;
-    float density  = 1.f;
-    float pressure = 0.f;
-    bool  active   = true;
+    float density;
+    float pressure;
+    bool  active;
 };
 
 struct SPHKernels {
@@ -108,13 +110,14 @@ struct SPHSpatialHash {
 template<int MAX_PARTICLES>
 struct FluidSPH {
     FluidParticle                 particles[MAX_PARTICLES];
-    int                           count = 0;
+    int                           count;
     SPHSpatialHash<MAX_PARTICLES> hash;
     FluidSPHConfig                cfg;
     SPHKernels                    kern;
 
-    FluidSPH()                          : kern(kSPHDefaultH) {}
-    explicit FluidSPH(const FluidSPHConfig& c) : cfg(c), kern(c.h) {}
+    // OPTIMIZATION: Explicitly set count to 0 in constructor lists
+    FluidSPH() : count(0), kern(kSPHDefaultH) {}
+    explicit FluidSPH(const FluidSPHConfig& c) : count(0), cfg(c), kern(c.h) {}
 
     bool add(Vec3 pos, Vec3 vel=Vec3(0,0,0)) {
         if (count>=MAX_PARTICLES) return false;
@@ -177,13 +180,32 @@ struct FluidSPH {
             p.velocity += p.accel * dt;
             p.position += p.velocity * dt;
 
-            auto bound=[&](float& x,float& vx,float lo,float hi){
-                if(x<lo){ vx+=cfg.bound_stiff*(lo-x)*dt; x=lo; }
-                if(x>hi){ vx+=cfg.bound_stiff*(hi-x)*dt; x=hi; }
-            };
-            bound(p.position.x,p.velocity.x,cfg.bound_min.x,cfg.bound_max.x);
-            bound(p.position.y,p.velocity.y,cfg.bound_min.y,cfg.bound_max.y);
-            bound(p.position.z,p.velocity.z,cfg.bound_min.z,cfg.bound_max.z);
+            // OPTIMIZATION: Flatly inlined clamping logic. 
+            // Avoids the assembly and storage overhead of a local lambda object.
+            // Uses "else if" since coordinates cannot exceed both bounds at the same time.
+            if (p.position.x < cfg.bound_min.x) { 
+                p.velocity.x += cfg.bound_stiff * (cfg.bound_min.x - p.position.x) * dt; 
+                p.position.x = cfg.bound_min.x; 
+            } else if (p.position.x > cfg.bound_max.x) { 
+                p.velocity.x += cfg.bound_stiff * (cfg.bound_max.x - p.position.x) * dt; 
+                p.position.x = cfg.bound_max.x; 
+            }
+
+            if (p.position.y < cfg.bound_min.y) { 
+                p.velocity.y += cfg.bound_stiff * (cfg.bound_min.y - p.position.y) * dt; 
+                p.position.y = cfg.bound_min.y; 
+            } else if (p.position.y > cfg.bound_max.y) { 
+                p.velocity.y += cfg.bound_stiff * (cfg.bound_max.y - p.position.y) * dt; 
+                p.position.y = cfg.bound_max.y; 
+            }
+
+            if (p.position.z < cfg.bound_min.z) { 
+                p.velocity.z += cfg.bound_stiff * (cfg.bound_min.z - p.position.z) * dt; 
+                p.position.z = cfg.bound_min.z; 
+            } else if (p.position.z > cfg.bound_max.z) { 
+                p.velocity.z += cfg.bound_stiff * (cfg.bound_max.z - p.position.z) * dt; 
+                p.position.z = cfg.bound_max.z; 
+            }
         }
     }
 

@@ -1,24 +1,27 @@
 #ifndef VECTOR_H
 #define VECTOR_H
 
+#include "internal.h"
+#include "runtime.h"
 #include "math_utils.h"
 #include <immintrin.h>
-#include <cassert>
-#include <cstdlib>
-#include <cstring>
 #include "arena.h"
-#include "../core/move.h"
+#include "move.h"
+#include <string.h>
 
-// <new> is C++ language infrastructure (placement new only) — not an STL container.
-// It is always safe to include and resolves placement new for PodVector.
-#include <new>
+// ── Portable Attributes ───────────────────────────────────────────────────────
+#if defined(_MSC_VER)
+#  define RT_NOINLINE __declspec(noinline)
+#elif defined(__GNUC__) || defined(__clang__)
+#  define RT_NOINLINE __attribute__((noinline))
+#else
+#  define RT_NOINLINE
+#endif
 
-// ── Portable type-trait builtins ──────────────────────────────────────────────
-// GCC uses __has_trivial_* while MSVC/Clang expose __is_trivially_*.
-#if defined(__GNUC__) && !defined(__clang__)
+#if defined(__GNUC__) || defined(__clang__)
 #  define RT_IS_TRIVIALLY_COPYABLE(T)     __is_trivially_copyable(T)
-#  define RT_IS_TRIVIALLY_DESTRUCTIBLE(T) __has_trivial_destructor(T)
-#  define RT_IS_TRIVIALLY_CONSTRUCTIBLE(T)__has_trivial_constructor(T)
+#  define RT_IS_TRIVIALLY_DESTRUCTIBLE(T) __is_trivially_destructible(T)
+#  define RT_IS_TRIVIALLY_CONSTRUCTIBLE(T)__is_trivially_constructible(T)
 #else
 #  define RT_IS_TRIVIALLY_COPYABLE(T)     __is_trivially_copyable(T)
 #  define RT_IS_TRIVIALLY_DESTRUCTIBLE(T) __is_trivially_destructible(T)
@@ -28,32 +31,29 @@
 struct alignas(16) Vec3 {
     float x, y, z, w;
 
-    FORCE_INLINE Vec3() { store(_mm_setzero_ps()); }
-    FORCE_INLINE Vec3(float _x, float _y, float _z) { store(_mm_set_ps(0.0f, _z, _y, _x)); }
-    FORCE_INLINE Vec3(float _f) { store(_mm_set1_ps(_f)); }
-    FORCE_INLINE Vec3(__m128 m) { store(m); }
+    Vec3() { store(_mm_setzero_ps()); }
+    Vec3(float _x, float _y, float _z) { store(_mm_set_ps(0.0f, _z, _y, _x)); }
+    Vec3(float _f) { store(_mm_set1_ps(_f)); }
+    Vec3(__m128 m) { store(m); }
 
     FORCE_INLINE __m128 load() const { return _mm_load_ps(&x); }
     FORCE_INLINE void store(__m128 m) { _mm_store_ps(&x, m); }
 
-    FORCE_INLINE Vec3 operator-() const {
-        return Vec3(_mm_xor_ps(load(), _mm_set1_ps(-0.0f)));
-    }
+    Vec3 operator-() const { return Vec3(_mm_xor_ps(load(), _mm_set1_ps(-0.0f))); }
+    Vec3 operator+(const Vec3& b) const { return Vec3(_mm_add_ps(load(), b.load())); }
+    Vec3 operator-(const Vec3& b) const { return Vec3(_mm_sub_ps(load(), b.load())); }
+    Vec3 operator*(const Vec3& b) const { return Vec3(_mm_mul_ps(load(), b.load())); }
+    Vec3 operator*(float s) const { return Vec3(_mm_mul_ps(load(), _mm_set1_ps(s))); }
+    Vec3 operator/(float s) const { return Vec3(_mm_mul_ps(load(), _mm_set1_ps(1.0f / s))); }
 
-    FORCE_INLINE Vec3 operator+(const Vec3& b) const { return Vec3(_mm_add_ps(load(), b.load())); }
-    FORCE_INLINE Vec3 operator-(const Vec3& b) const { return Vec3(_mm_sub_ps(load(), b.load())); }
-    FORCE_INLINE Vec3 operator*(const Vec3& b) const { return Vec3(_mm_mul_ps(load(), b.load())); }
-    FORCE_INLINE Vec3 operator*(float s) const { return Vec3(_mm_mul_ps(load(), _mm_set1_ps(s))); }
-    FORCE_INLINE Vec3 operator/(float s) const { return Vec3(_mm_mul_ps(load(), _mm_set1_ps(1.0f / s))); }
+    Vec3& operator+=(const Vec3& b) { store(_mm_add_ps(load(), b.load())); return *this; }
+    Vec3& operator-=(const Vec3& b) { store(_mm_sub_ps(load(), b.load())); return *this; }
+    Vec3& operator*=(float s) { store(_mm_mul_ps(load(), _mm_set1_ps(s))); return *this; }
 
-    FORCE_INLINE Vec3& operator+=(const Vec3& b) { store(_mm_add_ps(load(), b.load())); return *this; }
-    FORCE_INLINE Vec3& operator-=(const Vec3& b) { store(_mm_sub_ps(load(), b.load())); return *this; }
-    FORCE_INLINE Vec3& operator*=(float s) { store(_mm_mul_ps(load(), _mm_set1_ps(s))); return *this; }
+    Vec3 min(const Vec3& b) const { return Vec3(_mm_min_ps(load(), b.load())); }
+    Vec3 max(const Vec3& b) const { return Vec3(_mm_max_ps(load(), b.load())); }
 
-    FORCE_INLINE Vec3 min(const Vec3& b) const { return Vec3(_mm_min_ps(load(), b.load())); }
-    FORCE_INLINE Vec3 max(const Vec3& b) const { return Vec3(_mm_max_ps(load(), b.load())); }
-
-    FORCE_INLINE float dot(const Vec3& b) const {
+    float dot(const Vec3& b) const {
 #ifdef __SSE4_1__
         return _mm_cvtss_f32(_mm_dp_ps(load(), b.load(), 0x71));
 #else
@@ -65,17 +65,17 @@ struct alignas(16) Vec3 {
 #endif
     }
 
-    FORCE_INLINE Vec3 cross(const Vec3& b) const {
+    Vec3 cross(const Vec3& b) const {
         return Vec3(_mm_sub_ps(
             _mm_mul_ps(_mm_shuffle_ps(load(), load(), _MM_SHUFFLE(3, 0, 2, 1)), _mm_shuffle_ps(b.load(), b.load(), _MM_SHUFFLE(3, 1, 0, 2))),
             _mm_mul_ps(_mm_shuffle_ps(load(), load(), _MM_SHUFFLE(3, 1, 0, 2)), _mm_shuffle_ps(b.load(), b.load(), _MM_SHUFFLE(3, 0, 2, 1)))
         ));
     }
 
-    FORCE_INLINE float magnitudeSq() const { return dot(*this); }
-    FORCE_INLINE float magnitude() const { return fast_sqrt(dot(*this)); }
+    float magnitudeSq() const { return dot(*this); }
+    float magnitude() const { return fast_sqrt(dot(*this)); }
 
-    FORCE_INLINE Vec3 normalize() const {
+    Vec3 normalize() const {
         __m128 ml  = load();
         __m128 m2  = _mm_mul_ps(ml, ml);
         __m128 sum = _mm_add_ss(m2, _mm_shuffle_ps(m2, m2, _MM_SHUFFLE(1, 1, 1, 1)));
@@ -87,18 +87,16 @@ struct alignas(16) Vec3 {
 
         __m128 r  = _mm_rsqrt_ss(sum);
         __m128 nr = _mm_mul_ss(_mm_mul_ss(sum, r), r);
-        r = _mm_mul_ss(r, _mm_sub_ss(_mm_set_ss(1.5f),
-                                      _mm_mul_ss(_mm_set_ss(0.5f), nr)));
+        r = _mm_mul_ss(r, _mm_sub_ss(_mm_set_ss(1.5f), _mm_mul_ss(_mm_set_ss(0.5f), nr)));
         r = _mm_shuffle_ps(r, r, _MM_SHUFFLE(0, 0, 0, 0));
         return Vec3(_mm_mul_ps(ml, r));
     }
 
-    FORCE_INLINE float hmax3() const { return fast_max(x, fast_max(y, z)); }
-    FORCE_INLINE float hmin3() const { return fast_min(x, fast_min(y, z)); }
+    float hmax3() const { return fast_max(x, fast_max(y, z)); }
+    float hmin3() const { return fast_min(x, fast_min(y, z)); }
 };
 
 struct Vec2 {
-    // Dual naming: (x,y) for position, (u,v) for texture coords
     union { float x, u; };
     union { float y, v; };
 
@@ -106,53 +104,70 @@ struct Vec2 {
     Vec2(float _x, float _y) : x(_x), y(_y) {}
     explicit Vec2(float f) : x(f), y(f) {}
 
-    FORCE_INLINE Vec2 operator-()              const { return {-x, -y}; }
-    FORCE_INLINE Vec2 operator+(Vec2 b)        const { return {x+b.x, y+b.y}; }
-    FORCE_INLINE Vec2 operator-(Vec2 b)        const { return {x-b.x, y-b.y}; }
-    FORCE_INLINE Vec2 operator*(Vec2 b)        const { return {x*b.x, y*b.y}; }
-    FORCE_INLINE Vec2 operator*(float s)       const { return {x*s, y*s}; }
-    FORCE_INLINE Vec2 operator/(float s)       const { float inv=1.f/s; return {x*inv, y*inv}; }
-    FORCE_INLINE Vec2& operator+=(Vec2 b)            { x+=b.x; y+=b.y; return *this; }
-    FORCE_INLINE Vec2& operator-=(Vec2 b)            { x-=b.x; y-=b.y; return *this; }
-    FORCE_INLINE Vec2& operator*=(float s)           { x*=s;   y*=s;   return *this; }
-    FORCE_INLINE bool  operator==(Vec2 b)      const { return x==b.x && y==b.y; }
-    FORCE_INLINE bool  operator!=(Vec2 b)      const { return x!=b.x || y!=b.y; }
+    Vec2 operator-()              const { return {-x, -y}; }
+    Vec2 operator+(Vec2 b)        const { return {x+b.x, y+b.y}; }
+    Vec2 operator-(Vec2 b)        const { return {x-b.x, y-b.y}; }
+    Vec2 operator*(Vec2 b)        const { return {x*b.x, y*b.y}; }
+    Vec2 operator*(float s)       const { return {x*s, y*s}; }
+    Vec2 operator/(float s)       const { float inv=1.f/s; return {x*inv, y*inv}; }
+    Vec2& operator+=(Vec2 b)            { x+=b.x; y+=b.y; return *this; }
+    Vec2& operator-=(Vec2 b)            { x-=b.x; y-=b.y; return *this; }
+    Vec2& operator*=(float s)           { x*=s;   y*=s;   return *this; }
+    bool  operator==(Vec2 b)      const { return x==b.x && y==b.y; }
+    bool  operator!=(Vec2 b)      const { return x!=b.x || y!=b.y; }
 
-    FORCE_INLINE float dot(Vec2 b)             const { return x*b.x + y*b.y; }
-    FORCE_INLINE float cross(Vec2 b)           const { return x*b.y - y*b.x; }  // scalar cross (z-component)
-    FORCE_INLINE float lengthSq()              const { return x*x + y*y; }
-    FORCE_INLINE float length()                const { return fast_sqrt(x*x + y*y); }
-    FORCE_INLINE Vec2  normalize()             const { float l=length(); return is_zero_f(l)?Vec2(0,0):(*this/l); }
-    FORCE_INLINE Vec2  perp()                  const { return {-y, x}; }   // 90° CCW
-    FORCE_INLINE Vec2  lerp(Vec2 b, float t)   const { return {fast_lerp(x,b.x,t), fast_lerp(y,b.y,t)}; }
-    FORCE_INLINE Vec2  min(Vec2 b)             const { return {fast_min(x,b.x), fast_min(y,b.y)}; }
-    FORCE_INLINE Vec2  max(Vec2 b)             const { return {fast_max(x,b.x), fast_max(y,b.y)}; }
-    FORCE_INLINE Vec2  abs()                   const { return {fast_abs(x), fast_abs(y)}; }
-    FORCE_INLINE float dist(Vec2 b)            const { return (*this-b).length(); }
+    float dot(Vec2 b)             const { return x*b.x + y*b.y; }
+    float cross(Vec2 b)           const { return x*b.y - y*b.x; }
+    float lengthSq()              const { return x*x + y*y; }
+    float length()                const { return fast_sqrt(x*x + y*y); }
+    Vec2  normalize()             const { float l=length(); return is_zero_f(l)?Vec2(0,0):(*this/l); }
+    Vec2  perp()                  const { return {-y, x}; }
+    Vec2  lerp(Vec2 b, float t)   const { return {fast_lerp(x,b.x,t), fast_lerp(y,b.y,t)}; }
+    Vec2  min(Vec2 b)             const { return {fast_min(x,b.x), fast_min(y,b.y)}; }
+    Vec2  max(Vec2 b)             const { return {fast_max(x,b.x), fast_max(y,b.y)}; }
+    Vec2  abs()                   const { return {fast_abs(x), fast_abs(y)}; }
+    float dist(Vec2 b)            const { return (*this-b).length(); }
 };
-FORCE_INLINE Vec2 operator*(float s, Vec2 v) { return v*s; }
+inline Vec2 operator*(float s, Vec2 v) { return v*s; }
 
-// Integer 2D vector — tile coords, screen pixels, grid positions
 struct Vec2i {
     int x, y;
     Vec2i() : x(0), y(0) {}
     Vec2i(int _x, int _y) : x(_x), y(_y) {}
     explicit Vec2i(Vec2 v) : x((int)v.x), y((int)v.y) {}
 
-    FORCE_INLINE Vec2i operator+(Vec2i b)  const { return {x+b.x, y+b.y}; }
-    FORCE_INLINE Vec2i operator-(Vec2i b)  const { return {x-b.x, y-b.y}; }
-    FORCE_INLINE Vec2i operator*(int s)    const { return {x*s,   y*s};   }
-    FORCE_INLINE Vec2i& operator+=(Vec2i b)      { x+=b.x; y+=b.y; return *this; }
-    FORCE_INLINE Vec2i& operator-=(Vec2i b)      { x-=b.x; y-=b.y; return *this; }
-    FORCE_INLINE bool   operator==(Vec2i b) const { return x==b.x && y==b.y; }
-    FORCE_INLINE bool   operator!=(Vec2i b) const { return x!=b.x || y!=b.y; }
-    FORCE_INLINE Vec2   toFloat()           const { return {(float)x, (float)y}; }
+    Vec2i operator+(Vec2i b)  const { return {x+b.x, y+b.y}; }
+    Vec2i operator-(Vec2i b)  const { return {x-b.x, y-b.y}; }
+    Vec2i operator*(int s)    const { return {x*s,   y*s};   }
+    Vec2i& operator+=(Vec2i b)      { x+=b.x; y+=b.y; return *this; }
+    Vec2i& operator-=(Vec2i b)      { x-=b.x; y-=b.y; return *this; }
+    bool   operator==(Vec2i b) const { return x==b.x && y==b.y; }
+    bool   operator!=(Vec2i b) const { return x!=b.x || y!=b.y; }
+    Vec2   toFloat()           const { return {(float)x, (float)y}; }
 };
 
 constexpr size_t kPodVecMinCap   = 4;
 constexpr size_t kPodVecMinAlign = 16;
 
-// Minimal reverse iterator — avoids <iterator>.
+// ── Shared Untyped Allocation Routine (Merged Across All POD Instantiations) ──
+RT_NOINLINE inline void* podvec_realloc_buffer(void* old_data, size_t old_bytes, size_t new_bytes, 
+                                               size_t align, LinearArena* arena) 
+{
+    void* new_data = arena
+        ? arena->alloc(new_bytes, align)
+        : _aligned_malloc(new_bytes, align);
+
+    if (!new_data) panic_abort("PodVector OOM");
+
+    if (old_data && old_bytes > 0) {
+        memcpy(new_data, old_data, old_bytes);
+    }
+    if (old_data && !arena) {
+        _aligned_free(old_data);
+    }
+    return new_data;
+}
+
 template<typename Iter>
 struct PodVecRevIter {
     Iter cur;
@@ -179,7 +194,10 @@ public:
     explicit PodVector(LinearArena* arena) : m_data(nullptr), m_size(0), m_capacity(0), m_arena(arena) {}
     explicit PodVector(size_t n, LinearArena* arena = nullptr) : m_data(nullptr), m_size(0), m_capacity(0), m_arena(arena) { resize(n); }
 
-    ~PodVector() { clear(); if (m_data && !m_arena) aligned_free(m_data); }
+    ~PodVector() {
+        clear();
+        if (m_data && !m_arena) _aligned_free(m_data);
+    }
 
     PodVector(const PodVector& other) : m_data(nullptr), m_size(0), m_capacity(0), m_arena(other.m_arena) {
         if (other.m_size > 0) {
@@ -215,7 +233,8 @@ public:
 
     PodVector& operator=(PodVector&& other) noexcept {
         if (this != &other) {
-            if (m_data && !m_arena) aligned_free(m_data);
+            clear();
+            if (m_data && !m_arena) _aligned_free(m_data);
             m_data     = other.m_data;     m_size     = other.m_size;
             m_capacity = other.m_capacity; m_arena    = other.m_arena;
             other.m_data = nullptr; other.m_size = 0; other.m_capacity = 0;
@@ -226,28 +245,41 @@ public:
     FORCE_INLINE T& operator[](size_t i) { assert(i < m_size); return m_data[i]; }
     FORCE_INLINE const T& operator[](size_t i) const { assert(i < m_size); return m_data[i]; }
 
-    T& back()              { assert(m_size > 0); return m_data[m_size - 1]; }
-    const T& back()  const { assert(m_size > 0); return m_data[m_size - 1]; }
-    T& front()             { assert(m_size > 0); return m_data[0]; }
-    const T& front() const { assert(m_size > 0); return m_data[0]; }
+    FORCE_INLINE T& back()              { assert(m_size > 0); return m_data[m_size - 1]; }
+    FORCE_INLINE const T& back()  const { assert(m_size > 0); return m_data[m_size - 1]; }
+    FORCE_INLINE T& front()             { assert(m_size > 0); return m_data[0]; }
+    FORCE_INLINE const T& front() const { assert(m_size > 0); return m_data[0]; }
 
-    T*       data()       { return m_data; }
-    const T* data() const { return m_data; }
-    size_t   size()       const { return m_size; }
-    size_t   capacity()   const { return m_capacity; }
-    bool     empty()      const { return m_size == 0; }
+    FORCE_INLINE T*       data()       { return m_data; }
+    FORCE_INLINE const T* data() const { return m_data; }
+    FORCE_INLINE size_t   size()       const { return m_size; }
+    FORCE_INLINE size_t   capacity()   const { return m_capacity; }
+    FORCE_INLINE bool     empty()      const { return m_size == 0; }
 
-    void clear() {
+    inline __attribute__((always_inline, no_icf)) void clear() {
         if constexpr (!RT_IS_TRIVIALLY_DESTRUCTIBLE(T)) {
             for (size_t i = 0; i < m_size; ++i) m_data[i].~T();
         }
         m_size = 0;
     }
 
+    void reset() {
+        clear();
+        if (m_data && !m_arena) {
+            _aligned_free(m_data);
+            m_data = nullptr;
+        }
+        m_capacity = 0;
+    }
+
     void assign(size_t n, const T& val) {
         clear();
         reserve(n);
-        for (size_t i = 0; i < n; ++i) new (&m_data[i]) T(val);
+        if constexpr (sizeof(T) == 1 && RT_IS_TRIVIALLY_COPYABLE(T)) {
+            memset(static_cast<void*>(m_data), static_cast<unsigned char>(val), n);
+        } else {
+            for (size_t i = 0; i < n; ++i) new (&m_data[i]) T(val);
+        }
         m_size = n;
     }
 
@@ -273,14 +305,14 @@ public:
     void shrink_to_fit() {
         if (m_size == m_capacity) return;
         if (m_size == 0) {
-            if (m_data && !m_arena) aligned_free(m_data);
+            if (m_data && !m_arena) _aligned_free(m_data);
             m_data = nullptr; m_capacity = 0;
             return;
         }
         reallocate(m_size);
     }
 
-    void reserve(size_t new_cap) {
+    FORCE_INLINE void reserve(size_t new_cap) {
         if (new_cap <= m_capacity) return;
         reallocate(new_cap);
     }
@@ -292,10 +324,14 @@ public:
             }
         } else if (n > m_size) {
             reserve(n);
-            size_t old_size = m_size;
-            for (size_t i = old_size; i < n; ++i) {
-                new (&m_data[i]) T();
-                m_size++;
+            const size_t old_size = m_size;
+            if constexpr (RT_IS_TRIVIALLY_CONSTRUCTIBLE(T)) {
+                // Inlines cleanly and completely eliminates the 176-byte per-TU loop stub
+                memset(static_cast<void*>(m_data + old_size), 0, (n - old_size) * sizeof(T));
+            } else {
+                for (size_t i = old_size; i < n; ++i) {
+                    new (&m_data[i]) T();
+                }
             }
         }
         m_size = n;
@@ -308,10 +344,13 @@ public:
             }
         } else if (n > m_size) {
             reserve(n);
-            size_t old_size = m_size;
-            for (size_t i = old_size; i < n; ++i) {
-                new (&m_data[i]) T(val);
-                m_size++;
+            const size_t old_size = m_size;
+            if constexpr (sizeof(T) == 1 && RT_IS_TRIVIALLY_COPYABLE(T)) {
+                memset(static_cast<void*>(m_data + old_size), static_cast<unsigned char>(val), n - old_size);
+            } else {
+                for (size_t i = old_size; i < n; ++i) {
+                    new (&m_data[i]) T(val);
+                }
             }
         }
         m_size = n;
@@ -320,101 +359,73 @@ public:
     void resize_uninitialized(size_t n) {
         static_assert(RT_IS_TRIVIALLY_CONSTRUCTIBLE(T) &&
                       RT_IS_TRIVIALLY_DESTRUCTIBLE(T),
-            "resize_uninitialized requires a trivially constructible and "
-            "trivially destructible type — use resize() for non-POD types.");
+            "resize_uninitialized requires POD type");
         if (n > m_capacity) reserve(n);
         m_size = n;
     }
 
-    void push_back(const T& val) {
-        if (m_size == m_capacity) grow();
+    FORCE_INLINE void push_back(const T& val) {
+        if (m_size == m_capacity) reserve(m_capacity ? m_capacity + (m_capacity >> 1) : kPodVecMinCap);
         new (&m_data[m_size++]) T(val);
     }
 
-    void push_back(T&& val) {
-        if (m_size == m_capacity) grow();
+    FORCE_INLINE void push_back(T&& val) {
+        if (m_size == m_capacity) reserve(m_capacity ? m_capacity + (m_capacity >> 1) : kPodVecMinCap);
         new (&m_data[m_size++]) T(rt_move(val));
     }
 
     template<typename... Args>
-    T& emplace_back(Args&&... args) {
-        if (m_size == m_capacity) grow();
+    FORCE_INLINE T& emplace_back(Args&&... args) {
+        if (m_size == m_capacity) reserve(m_capacity ? m_capacity + (m_capacity >> 1) : kPodVecMinCap);
         T* ptr = new (&m_data[m_size++]) T(rt_forward<Args>(args)...);
         return *ptr;
     }
 
-    void pop_back() {
+    FORCE_INLINE void pop_back() {
         if (m_size > 0) {
             --m_size;
             if constexpr (!RT_IS_TRIVIALLY_DESTRUCTIBLE(T)) m_data[m_size].~T();
         }
     }
 
-    iterator begin() { return m_data; }
-    iterator end()   { return m_data + m_size; }
-    const_iterator begin() const { return m_data; }
-    const_iterator end()   const { return m_data + m_size; }
-    reverse_iterator rbegin() { return reverse_iterator(end()); }
-    reverse_iterator rend()   { return reverse_iterator(begin()); }
-    const_reverse_iterator rbegin() const { return const_reverse_iterator(end()); }
-    const_reverse_iterator rend()   const { return const_reverse_iterator(begin()); }
+    FORCE_INLINE iterator begin() { return m_data; }
+    FORCE_INLINE iterator end()   { return m_data + m_size; }
+    FORCE_INLINE const_iterator begin() const { return m_data; }
+    FORCE_INLINE const_iterator end()   const { return m_data + m_size; }
+    FORCE_INLINE reverse_iterator rbegin() { return reverse_iterator(end()); }
+    FORCE_INLINE reverse_iterator rend()   { return reverse_iterator(begin()); }
+    FORCE_INLINE const_reverse_iterator rbegin() const { return const_reverse_iterator(end()); }
+    FORCE_INLINE const_reverse_iterator rend()   const { return const_reverse_iterator(begin()); }
 
 private:
-    void grow() {
-        const size_t new_cap = m_capacity == 0
-            ? kPodVecMinCap
-            : m_capacity + (m_capacity >> 1);
-        reserve(new_cap);
-    }
-
     void reallocate(size_t new_cap) {
-        const size_t alignment = alignof(T) > kPodVecMinAlign
-            ? alignof(T) : kPodVecMinAlign;
+        const size_t alignment = alignof(T) > kPodVecMinAlign ? alignof(T) : kPodVecMinAlign;
+        const size_t bytes = new_cap * sizeof(T);
 
-        T* new_data = nullptr;
-        if (m_arena) {
-            new_data = static_cast<T*>(m_arena->alloc(new_cap * sizeof(T), alignment));
-            assert(new_data && "LinearArena out of memory during PodVector reallocate!");
+        if constexpr (RT_IS_TRIVIALLY_COPYABLE(T)) {
+            // All POD types delegate to the shared function, collapsing identical functions into one
+            m_data = static_cast<T*>(podvec_realloc_buffer(
+                m_data, m_size * sizeof(T), bytes, alignment, m_arena));
         } else {
-            new_data = static_cast<T*>(aligned_alloc_internal(alignment, new_cap * sizeof(T)));
-            if (!new_data) {
-                assert(false && "Out of memory during PodVector reallocate!");
-                abort();
-            }
-        }
+            // Complex types (e.g. DynString) retain move construction + destruction
+            T* new_data = m_arena
+                ? static_cast<T*>(m_arena->alloc(bytes, alignment))
+                : static_cast<T*>(_aligned_malloc(bytes, alignment));
 
-        if (m_size > 0) {
-            if constexpr (RT_IS_TRIVIALLY_COPYABLE(T)) {
-                memcpy(new_data, m_data, m_size * sizeof(T));
-            } else {
+            if (!new_data) panic_abort("PodVector OOM");
+
+            if (m_size > 0) {
                 for (size_t i = 0; i < m_size; ++i) {
                     new (&new_data[i]) T(rt_move(m_data[i]));
                     m_data[i].~T();
                 }
             }
+
+            if (m_data && !m_arena) _aligned_free(m_data);
+            m_data = new_data;
         }
 
-        if (m_data && !m_arena) aligned_free(m_data);
-        m_data     = new_data;
         m_capacity = new_cap;
-    }
-
-    static void* aligned_alloc_internal(size_t alignment, size_t size) {
-#ifdef _WIN32
-        return _aligned_malloc(size, alignment);
-#else
-        void* ptr = nullptr;
-        if (posix_memalign(&ptr, alignment, size) != 0) return nullptr;
-        return ptr;
-#endif
-    }
-
-    static void aligned_free(void* ptr) {
-#ifdef _WIN32
-        _aligned_free(ptr);
-#else
-        free(ptr);
-#endif
     }
 
     T*           m_data;
@@ -423,4 +434,4 @@ private:
     LinearArena* m_arena;
 };
 
-#endif
+#endif // VECTOR_H

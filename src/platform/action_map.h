@@ -21,6 +21,7 @@
 #endif
 
 #include "input.h"
+#include "gamepad.h"
 #include "../core/string_id.h"
 #include <cstdint>
 #include <cstring>
@@ -32,9 +33,11 @@ struct ActionBinding {
     StringID  id    = 0;
     int       keys[kMaxBindingsPerAction] = {-1,-1,-1,-1};
     int       mouse = -1;
+    int       gamepad_button = -1;
     int       count = 0;
 
     void addKey(int k) { if (count < kMaxBindingsPerAction) keys[count++] = k; }
+    void setGamepad(int btn) { gamepad_button = btn; }
 };
 
 class ActionMap {
@@ -52,6 +55,9 @@ public:
     void bindMouse(StringID action, int mouseBtn) {
         getOrCreate(action).mouse = mouseBtn;
     }
+    void bindGamepad(StringID action, GamepadButton btn) {
+        getOrCreate(action).gamepad_button = static_cast<int>(btn);
+    }
     void unbind(StringID action) {
         for (int i = 0; i < count_; ++i) {
             if (bindings_[i].id == action) {
@@ -61,30 +67,43 @@ public:
     }
     void clear() { count_ = 0; }
 
-    bool isDown(StringID action, const InputManager& input) const {
+    bool isDown(StringID action, const InputManager& input, int playerIndex = 0) const {
         const ActionBinding* b = find(action);
         if (!b) return false;
         for (int i = 0; i < b->count; ++i)
             if (b->keys[i] >= 0 && input.isKeyDown(b->keys[i])) return true;
         if (b->mouse >= 0 && input.isMouseButtonDown(b->mouse)) return true;
+        if (b->gamepad_button >= 0) {
+            const GamepadState& gp = globalGamepad().state(playerIndex);
+            if (gp.connected && gp.isDown(static_cast<GamepadButton>(b->gamepad_button))) return true;
+        }
         return false;
     }
 
-    bool isPressed(StringID action, const InputManager& input) const {
+    bool isPressed(StringID action, const InputManager& input, int playerIndex = 0) const {
         const ActionBinding* b = find(action);
         if (!b) return false;
         for (int i = 0; i < b->count; ++i)
             if (b->keys[i] >= 0 && input.isKeyPressed(b->keys[i])) return true;
         if (b->mouse >= 0 && input.isMouseButtonPressed(b->mouse)) return true;
+        if (b->gamepad_button >= 0) {
+            const GamepadState& gp = globalGamepad().state(playerIndex);
+            if (gp.connected && gp.isPressed(static_cast<GamepadButton>(b->gamepad_button))) return true;
+        }
         return false;
     }
 
-    Vec2 axis2D(StringID left, StringID right, StringID up, StringID down, const InputManager& inp) const {
+    Vec2 axis2D(StringID left, StringID right, StringID up, StringID down, const InputManager& inp, int playerIndex = 0) const {
+        const GamepadState& gp = globalGamepad().state(playerIndex);
+        if (gp.connected) {
+            Vec2 stick = gp.leftStick();
+            if (stick.lengthSq() > 0.04f) return stick;
+        }
         Vec2 v{};
-        if (isDown(left,  inp)) v.x -= 1.f;
-        if (isDown(right, inp)) v.x += 1.f;
-        if (isDown(up,    inp)) v.y -= 1.f;
-        if (isDown(down,  inp)) v.y += 1.f;
+        if (isDown(left,  inp, playerIndex)) v.x -= 1.f;
+        if (isDown(right, inp, playerIndex)) v.x += 1.f;
+        if (isDown(up,    inp, playerIndex)) v.y -= 1.f;
+        if (isDown(down,  inp, playerIndex)) v.y += 1.f;
         float l = v.length();
         return l > 1.f ? v * (1.f/l) : v;
     }

@@ -2,16 +2,12 @@
 #ifndef CURVE_H
 #define CURVE_H
 
-// Parametric curves: Bezier (quadratic + cubic) and Catmull-Rom splines.
-// All operate on Vec2 for 2D paths; extend to Vec3 trivially.
-
 #include "vector.h"
 #include "easing.h"
-#include "../core/arena.h"
+#include "arena.h"
 
 // ─── Bezier ──────────────────────────────────────────────────────────────────
 
-// Quadratic Bezier: P0→P1(control)→P2
 FORCE_INLINE Vec2 bezierQuad(Vec2 p0, Vec2 p1, Vec2 p2, float t) {
     float it = 1.f - t;
     return p0*(it*it) + p1*(2*it*t) + p2*(t*t);
@@ -20,7 +16,6 @@ FORCE_INLINE Vec2 bezierQuadTangent(Vec2 p0, Vec2 p1, Vec2 p2, float t) {
     return (p1-p0)*2*(1-t) + (p2-p1)*2*t;
 }
 
-// Cubic Bezier: P0→P1(ctrl1)→P2(ctrl2)→P3
 FORCE_INLINE Vec2 bezierCubic(Vec2 p0, Vec2 p1, Vec2 p2, Vec2 p3, float t) {
     float it = 1.f - t, it2=it*it, t2=t*t;
     return p0*(it2*it) + p1*(3*it2*t) + p2*(3*it*t2) + p3*(t2*t);
@@ -37,7 +32,7 @@ FORCE_INLINE Vec2 catmullRom(Vec2 p0, Vec2 p1, Vec2 p2, Vec2 p3, float t) {
     return (p0*(-t3+2*t2-t) + p1*(3*t3-5*t2+2) + p2*(-3*t3+4*t2+t) + p3*(t3-t2)) * 0.5f;
 }
 
-// ─── Spline: sequence of Catmull-Rom segments ────────────────────────────────
+// ─── Spline ──────────────────────────────────────────────────────────────────
 
 struct Spline {
     static constexpr int kMaxPoints = 64;
@@ -47,7 +42,6 @@ struct Spline {
     void add(Vec2 p) { if (count < kMaxPoints) points[count++] = p; }
     void clear()     { count = 0; }
 
-    // Evaluate at t in [0, count-1]; handles clamped endpoints
     Vec2 evaluate(float t) const {
         if (count < 2) return count == 1 ? points[0] : Vec2{};
         t = fast_clamp(t, 0.f, (float)(count - 1));
@@ -60,7 +54,6 @@ struct Spline {
         return catmullRom(p0, p1, p2, p3, lt);
     }
 
-    // Total arc-length approximation using N samples per segment
     float arcLength(int samplesPerSeg = 8) const {
         if (count < 2) return 0.f;
         float len = 0.f;
@@ -76,7 +69,6 @@ struct Spline {
         return len;
     }
 
-    // Evaluate at normalized arc-length position u in [0,1] (approximate)
     Vec2 evaluateNorm(float u, int samplesPerSeg = 8) const {
         float total = arcLength(samplesPerSeg);
         if (total < 1e-5f) return evaluate(0.f);
@@ -100,7 +92,7 @@ struct Spline {
     }
 };
 
-// ─── Keyframe float curve (value over time) ───────────────────────────────────
+// ─── Keyframe float curve ─────────────────────────────────────────────────────
 
 struct FloatCurve {
     static constexpr int kMaxKeys = 32;
@@ -125,4 +117,4 @@ struct FloatCurve {
     }
 };
 
-#endif
+#endif // CURVE_H

@@ -3,46 +3,73 @@
 #define RT_RUNTIME_H
 
 #ifdef _WIN32
-#  define WIN32_LEAN_AND_MEAN
 #  include <windows.h>
 
-/** Global HINSTANCE set by WinMain before calling main().
- *  Use this anywhere you need to pass hInstance (e.g. CreateWindow, LoadIcon). */
+/** Global HINSTANCE set by WinMain before calling main(). */
 extern HINSTANCE g_hInstance;
 
 #endif // _WIN32
 
+#ifndef _SIZE_T_DEFINED
+#  define _SIZE_T_DEFINED
+typedef decltype(sizeof(0)) size_t;
+#endif
+
 #ifdef __cplusplus
+namespace std {
+    enum class align_val_t : size_t {};
+    struct nothrow_t { explicit nothrow_t() = default; };
+    extern const nothrow_t nothrow;
+}
+
+#pragma push_macro("new")
+#undef new
+inline void* operator new(size_t, void* ptr) noexcept { return ptr; }
+inline void* operator new[](size_t, void* ptr) noexcept { return ptr; }
+inline void  operator delete(void*, void*) noexcept {}
+inline void  operator delete[](void*, void*) noexcept {}
+#pragma pop_macro("new")
+
 extern "C" {
 #endif
 
-/** Initializes the engine runtime (platform hooks).
- *  Windows: SEH filter, optional debug console, hInstance.
- *  Linux/POSIX: ignores SIGPIPE on writes to broken pipes. */
+/** Initializes the engine runtime (platform hooks and crash handlers). */
 void runtime_init();
 
-/** Aborts execution with a formatted fatal message.
- *  Windows debug: OutputDebugString + __debugbreak.
- *  Windows release: crash_log.txt + MessageBox + stack addresses.
- *  POSIX: stderr + optional crash_log.txt, then abort(). */
+/** Aborts execution with a formatted fatal message and crash card. */
 void panic_abort(const char* fmt, ...);
 
-#ifdef _DEBUG
-/** Reports memory leaks to the debug output.
- *  Call at the very end of main() in debug builds. */
+/** Scans active allocations and prints a detailed leak report with filenames, lines, and callstacks. */
 void mem_report_leaks();
-#else
-/** No-op in release builds. */
-static inline void mem_report_leaks() {}
-#endif
+
+/** Explicitly tracked C-style allocation functions */
+void* tracked_malloc(size_t size, const char* file, int line);
+void* tracked_calloc(size_t num, size_t size, const char* file, int line);
+void* tracked_realloc(void* ptr, size_t size, const char* file, int line);
+void  tracked_free(void* ptr);
 
 #ifdef __cplusplus
 }
 #endif
 
+// ── Debug Overloaded Operator New Declarations ────────────────────────────────
+#if defined(_DEBUG) || !defined(NDEBUG)
+void* operator new(size_t size, const char* file, int line);
+void* operator new[](size_t size, const char* file, int line);
+void* operator new(size_t size, std::align_val_t al, const char* file, int line);
+void* operator new[](size_t size, std::align_val_t al, const char* file, int line);
+
+void operator delete(void* p, const char* file, int line) noexcept;
+void operator delete[](void* p, const char* file, int line) noexcept;
+void operator delete(void* p, std::align_val_t al, const char* file, int line) noexcept;
+void operator delete[](void* p, std::align_val_t al, const char* file, int line) noexcept;
+
+#ifndef TRACKED_NEW
+#  define TRACKED_NEW new(__FILE__, __LINE__)
+#endif
+#endif
+
 // ── rt_mutex_t ────────────────────────────────────────────────────────────────
-// Concrete mutex type backed by a Windows CRITICAL_SECTION.
-// Pass a pointer to this type to pthread_mutex_init/lock/unlock/destroy.
 #ifdef _WIN32
 #define RT_MUTEX_SENTINEL 0xBEEFCAFE
 

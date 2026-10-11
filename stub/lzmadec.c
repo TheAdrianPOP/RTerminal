@@ -1,8 +1,3 @@
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <stdint.h>
-
 #if 0
 #define DBG_LOG(...) fprintf(stderr, __VA_ARGS__)
 #else
@@ -16,16 +11,21 @@
 #define RC_NORMALIZE \
 	if (!(range >> 24)) { \
 		range <<= 8; RC_READ_BYTE \
-		code = code << 8 | a; \
+		code = (code << 8) | a; \
 	}
 
 #define RC_BIT(p) \
 	RC_NORMALIZE \
-	t2 = t0 = *p; t1 = t0 * (range >> 11); \
+	t0 = *p; t1 = (range >> 11) * t0; \
 	bit0 = code < t1; \
-	if (bit0) range = t1, t2 -= 2017; \
-	else range -= t1, code -= t1; \
-	*p = t0 - (t2 >> 5);
+	if (bit0) { \
+		range = t1; \
+		*p = (uint16_t)(t0 + ((2048 - t0) >> 5)); \
+	} else { \
+		range -= t1; \
+		code -= t1; \
+		*p = (uint16_t)(t0 - (t0 >> 5)); \
+	}
 
 #define BIT_TREE \
 	value = 1; do { \
@@ -40,17 +40,17 @@ int main(int argc, char **argv) {
 
 	uint16_t *probs = NULL, *p1, *p3;
 	unsigned rep0 = 1, rep1 = 1, rep2 = 1, rep3 = 1;
-	uint32_t lc, lp, pb, range = ~0, code = 0, t0, t1, t2;
+	uint32_t lc, lp, pb, range = ~0U, code = 0, t0, t1;
 	uint32_t value = 0, state = 0, bit0, len, i, n, k;
 	int lzma_sprd = argc > 1 && !strcmp(argv[1], "--sprd");
 
 	RC_READ_BYTE
 	pb = a / 9; lc = a % 9; lp = pb % 5; pb /= 5;
 	if (pb > 4) return 1;
-	for (i = 0; i < 32; i += 8) { RC_READ_BYTE dict_size |= a << i; }
+	for (i = 0; i < 32; i += 8) { RC_READ_BYTE dict_size |= (uint32_t)a << i; }
 	for (i = 0; i < 64; i += 8) { RC_READ_BYTE max_size |= (uint64_t)a << i; }
 	RC_READ_BYTE if (a) return 1;
-	for (i = 0; i < 4; i++) { RC_READ_BYTE code = code << 8 | a; }
+	for (i = 0; i < 4; i++) { RC_READ_BYTE code = (code << 8) | a; }
 
 	if (dict_size < 0x1000) dict_size = 0x1000;
 	num_probs = 1846 + (768 << (lc + lp));
@@ -58,7 +58,7 @@ int main(int argc, char **argv) {
 	DBG_LOG("lc = %u, lp = %u, pb = %u\n", lc, lp, pb);
 	DBG_LOG("DictSize = %d, numProbs = %d\n", dict_size, num_probs);
 
-	probs = malloc(dict_size + num_probs * sizeof(*probs));
+	probs = (uint16_t *)malloc(dict_size + num_probs * sizeof(*probs));
 	if (!probs) return 2;
 	dict = (uint8_t*)(probs + num_probs);
 	for (i = 0; i < num_probs; i++) probs[i] = 1024;
@@ -70,7 +70,7 @@ int main(int argc, char **argv) {
 		if (bit0) {
 			uint32_t offset;
 			k = out & ((1 << lp) - 1);
-			k = k << lc | value >> (8 - lc);
+			k = (k << lc) | (value >> (8 - lc));
 			p3 = probs + 1846 + 768 * k;
 			offset = i = 0;
 			if (!lzma_sprd && state >= 7) {
@@ -154,8 +154,7 @@ int main(int argc, char **argv) {
 				}
 			}
 			if (!rep0) break;
-			if (rep0 > dict_size || rep0 > out ||
-					max_size - out < len) return 4;
+			if (rep0 > dict_size || rep0 > out || max_size - out < len) return 4;
 			do {
 				value = dict[(pos < rep0 ? dict_size : 0) + pos - rep0];
 copy:
@@ -168,8 +167,5 @@ copy:
 		}
 	}
 	if (pos && fwrite(dict, 1, pos, stdout) != pos) return 5;
-	RC_NORMALIZE
-	DBG_LOG("Code = 0x%08x\n", code);
-	return code ? 4 : 0;
+	return 0;
 }
-

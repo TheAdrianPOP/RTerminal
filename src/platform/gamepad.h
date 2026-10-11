@@ -3,14 +3,7 @@
 #define GAMEPAD_H
 
 #include "../math/vector.h"
-#include "../math/math_utils.h"
-#include <cstring>
-
-#ifdef _WIN32
-#  define WIN32_LEAN_AND_MEAN
-#  include <Windows.h>
-#  include <Xinput.h>
-#endif
+#include <cstdint>
 
 enum class GamepadButton : uint32_t {
     A           = 0,
@@ -33,18 +26,18 @@ enum class GamepadButton : uint32_t {
 };
 
 struct GamepadState {
-    bool  connected      = false;
-    bool  buttons[16]    = {};
-    bool  prevButtons[16]= {};
+    bool  connected       = false;
+    bool  buttons[16]     = {};
+    bool  prevButtons[16] = {};
     float leftX  = 0.f, leftY  = 0.f;  // [-1, 1]
     float rightX = 0.f, rightY = 0.f;
-    float leftTrigger  = 0.f;           // [0, 1]
+    float leftTrigger  = 0.f;          // [0, 1]
     float rightTrigger = 0.f;
     int   playerIndex  = 0;
 
-    bool isDown   (GamepadButton b) const { return buttons[(int)b]; }
-    bool isPressed(GamepadButton b) const { return buttons[(int)b] && !prevButtons[(int)b]; }
-    bool isReleased(GamepadButton b)const { return !buttons[(int)b] && prevButtons[(int)b]; }
+    bool isDown   (GamepadButton b) const { return (int)b < 16 ? buttons[(int)b] : false; }
+    bool isPressed(GamepadButton b) const { return (int)b < 16 ? (buttons[(int)b] && !prevButtons[(int)b]) : false; }
+    bool isReleased(GamepadButton b)const { return (int)b < 16 ? (!buttons[(int)b] && prevButtons[(int)b]) : false; }
     Vec2 leftStick() const  { return {leftX,  leftY};  }
     Vec2 rightStick() const { return {rightX, rightY}; }
 };
@@ -53,89 +46,32 @@ class GamepadManager {
 public:
     static constexpr int kMaxControllers = 4;
 
-    void update(bool process_input = true) {
-        for (int i = 0; i < kMaxControllers; ++i)
-            memcpy(states_[i].prevButtons, states_[i].buttons, sizeof(states_[i].buttons));
-#ifdef _WIN32
-        updateXInput(process_input);
-#endif
-    }
+    GamepadManager();
+    ~GamepadManager();
 
-    const GamepadState& state(int player) const {
-        static GamepadState empty;
-        return (player>=0&&player<kMaxControllers) ? states_[player] : empty;
-    }
+    void update(bool process_input = true);
+    const GamepadState& state(int player) const;
     bool isConnected(int player) const { return state(player).connected; }
-    int  connectedCount() const {
-        int n=0; for (auto& s: states_) if (s.connected) ++n; return n;
-    }
+    int  connectedCount() const;
+    bool setVibration(int player, uint16_t strong_motor, uint16_t weak_motor);
 
 private:
     GamepadState states_[kMaxControllers];
 
-    static float applyDeadzone(float v, float dz=0.15f) {
-        if (fast_abs(v) < dz) return 0.f;
-        float sign = v>0?1.f:-1.f;
-        return sign * (fast_abs(v)-dz)/(1.f-dz);
-    }
+    static float applyDeadzone(float v, float dz = 0.15f);
 
 #ifdef _WIN32
-    typedef DWORD (WINAPI *XInputGetState_t)(DWORD, XINPUT_STATE*);
-
-    void updateXInput(bool process_input) {
-        static XInputGetState_t pfnGetState = nullptr;
-        static bool tried_load = false;
-
-        if (!tried_load) {
-            tried_load = true;
-            HMODULE hMod = LoadLibraryA("xinput1_4.dll");
-            if (!hMod) hMod = LoadLibraryA("xinput1_3.dll");
-            if (!hMod) hMod = LoadLibraryA("xinput9_1_0.dll");
-            if (hMod) pfnGetState = (XInputGetState_t)GetProcAddress(hMod, "XInputGetState");
-        }
-
-        if (!pfnGetState) {
-            for (int i=0; i<kMaxControllers; ++i) states_[i].connected = false;
-            return;
-        }
-
-        for (int i=0; i<kMaxControllers; ++i) {
-            XINPUT_STATE xs{};
-            DWORD r = pfnGetState(i, &xs);
-            GamepadState& s = states_[i];
-            s.connected   = (r == ERROR_SUCCESS);
-            s.playerIndex = i;
-            if (!s.connected) continue;
-            if (!process_input) {
-                memset(s.buttons, 0, sizeof(s.buttons));
-                s.leftTrigger = 0.f; s.rightTrigger = 0.f;
-                s.leftX = 0.f; s.leftY = 0.f; s.rightX = 0.f; s.rightY = 0.f;
-                continue;
-            }
-            auto& gp = xs.Gamepad;
-            constexpr WORD masks[16] = {
-                XINPUT_GAMEPAD_A, XINPUT_GAMEPAD_B, XINPUT_GAMEPAD_X, XINPUT_GAMEPAD_Y,
-                XINPUT_GAMEPAD_LEFT_SHOULDER, XINPUT_GAMEPAD_RIGHT_SHOULDER,
-                0, 0,
-                XINPUT_GAMEPAD_START, XINPUT_GAMEPAD_BACK,
-                XINPUT_GAMEPAD_LEFT_THUMB, XINPUT_GAMEPAD_RIGHT_THUMB,
-                XINPUT_GAMEPAD_DPAD_UP, XINPUT_GAMEPAD_DPAD_DOWN,
-                XINPUT_GAMEPAD_DPAD_LEFT, XINPUT_GAMEPAD_DPAD_RIGHT
-            };
-            for (int b=0; b<16; ++b) s.buttons[b] = masks[b] ? (gp.wButtons & masks[b]) != 0 : false;
-            s.leftTrigger  = gp.bLeftTrigger  / 255.f;
-            s.rightTrigger = gp.bRightTrigger / 255.f;
-            s.buttons[(int)GamepadButton::LTriggerBtn] = s.leftTrigger  > 0.5f;
-            s.buttons[(int)GamepadButton::RTriggerBtn] = s.rightTrigger > 0.5f;
-            s.leftX  = applyDeadzone(gp.sThumbLX / 32767.f);
-            s.leftY  = applyDeadzone(-gp.sThumbLY / 32767.f);
-            s.rightX = applyDeadzone(gp.sThumbRX / 32767.f);
-            s.rightY = applyDeadzone(-gp.sThumbRY / 32767.f);
-        }
-    }
+    using XInputGetState_t = unsigned long (__stdcall*)(unsigned long, void*);
+    using XInputSetState_t = unsigned long (__stdcall*)(unsigned long, void*);
+    XInputSetState_t pfnSetState_ = nullptr;
+    void updateXInput(bool process_input);
+#elif defined(__linux__)
+    int js_fds[kMaxControllers] = {-1, -1, -1, -1};
+    void updateLinuxJoysticks(bool process_input);
 #endif
 };
 
-inline GamepadManager& globalGamepad() { static GamepadManager gm; return gm; }
+// Declared only (defined once in engine/platform/input.cpp)
+GamepadManager& globalGamepad();
 
-#endif
+#endif // GAMEPAD_H

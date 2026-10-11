@@ -2,14 +2,7 @@
 #ifndef LOG_H
 #define LOG_H
 
-#include <cstdio>
-#include <cstdarg>
-#include <ctime>
-
-#ifdef _WIN32
-#  define WIN32_LEAN_AND_MEAN
-#  include <Windows.h>
-#endif
+#include "internal.h"
 
 // ── Log levels ────────────────────────────────────────────────────────────────
 enum class LogLevel { Debug = 0, Info = 1, Warn = 2, Error = 3, Off = 4 };
@@ -37,17 +30,22 @@ inline void logWrite(LogLevel level, const char* prefix, const char* fmt, ...) {
 
     char msg[1024];
     va_list ap; va_start(ap, fmt);
-    vsnprintf(msg, sizeof(msg), fmt, ap);
+    rt_vsnprintf(msg, sizeof(msg), fmt, ap);
     va_end(ap);
 
     char line[1152];
     if (cfg.timestamps) {
-        time_t t = time(nullptr);
+#ifdef _WIN32
+        SYSTEMTIME st;
+        GetLocalTime(&st);
         char ts[32];
-        strftime(ts, sizeof(ts), "%H:%M:%S", localtime(&t));
-        snprintf(line, sizeof(line), "[%s]%s %s\n", ts, prefix, msg);
+        rt_snprintf(ts, sizeof(ts), "%02d:%02d:%02d", (int)st.wHour, (int)st.wMinute, (int)st.wSecond);
+#else
+        const char* ts = "00:00:00";
+#endif
+        rt_snprintf(line, sizeof(line), "[%s]%s %s\n", ts, prefix, msg);
     } else {
-        snprintf(line, sizeof(line), "%s %s\n", prefix, msg);
+        rt_snprintf(line, sizeof(line), "%s %s\n", prefix, msg);
     }
 
     if (cfg.to_stderr)  fputs(line, stderr);

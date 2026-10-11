@@ -1,15 +1,14 @@
 #ifndef ENGINE_CONFIG_H
 #define ENGINE_CONFIG_H
 
-#include <cstdint>
-#include <cstring>
+#include "internal.h"
 
 constexpr int kAudioSampleRate     = 44100;
 constexpr int kAudioChannels       = 2;
 constexpr int kAudioBytesPerSample = 2;
 constexpr int kAudioMaxVoices      = 64;
-constexpr int kAudioMixFrames      = 2048;
-constexpr int kAudioNumBuffers     = 2;
+constexpr int kAudioMixFrames      = 512;
+constexpr int kAudioNumBuffers     = 4;
 constexpr float kAudioMaxDist        = 50.f;
 constexpr float kAudioRefDist        = 1.0f;
 constexpr int kAudioBufBytes       = kAudioMixFrames * kAudioChannels * kAudioBytesPerSample;
@@ -130,15 +129,17 @@ constexpr float kFluidGridRenderThreshold = 0.05f;
 #include "str.h"
 #include "vector.h"
 
-inline const Vec3 kParticleDefaultDirection = Vec3(0.f, 1.f, 0.f);
-inline const Vec3 kParticleDefaultGravity   = Vec3(0.f, -4.f, 0.f);
-inline const RGBColor kParticleDefaultColor     = {255, 200, 80};
-inline const Vec3 kSPHDefaultBoundMin = Vec3(-1.f, 0.f, -1.f);
-inline const Vec3 kSPHDefaultBoundMax = Vec3( 1.f, 2.f,  1.f);
+const Vec3 kParticleDefaultDirection = Vec3(0.f, 1.f, 0.f);
+const Vec3 kParticleDefaultGravity   = Vec3(0.f, -4.f, 0.f);
+const RGBColor kParticleDefaultColor = {255, 200, 80};
+const Vec3 kSPHDefaultBoundMin       = Vec3(-1.f, 0.f, -1.f);
+const Vec3 kSPHDefaultBoundMax       = Vec3( 1.f, 2.f,  1.f);
+
 enum class ColorMode {
     TrueColor,
     Ansi256,
     Ansi16,
+    Ansi8,
     Monochrome
 };
 

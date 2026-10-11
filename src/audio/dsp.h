@@ -2,18 +2,7 @@
 #ifndef DSP_H
 #define DSP_H
 
-// DSP (Digital Signal Processing) effects for audio post-processing.
-// Each effect processes a stereo float buffer in-place.
-// Chain effects: apply each to the same buffer sequentially.
-//
-// Usage (in audio stream callback):
-//   DspChain chain;
-//   chain.add<DspLowPass>(800.f, 44100);
-//   chain.add<DspReverb>();
-//   chain.process(left, right, frameCount);
-
-#include "../math/math_utils.h"
-#include "../math/vector.h"
+#include "math_utils.h"
 
 // ── Base effect ───────────────────────────────────────────────────────────────
 

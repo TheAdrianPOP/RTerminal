@@ -1,6 +1,7 @@
 #ifndef MATH_UTILS_H
 #define MATH_UTILS_H
 
+#include "runtime.h"
 #include <cmath>
 #include <cstdint>
 #include <cfloat>
@@ -296,4 +297,4 @@ FORCE_INLINE void prefetch_l1(const void* ptr) {
     _mm_prefetch((const char*)ptr, _MM_HINT_T0);
 }
 
-#endif
+#endif // MATH_UTILS_H

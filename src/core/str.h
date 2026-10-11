@@ -2,9 +2,8 @@
 #ifndef STR_H
 #define STR_H
 
-#include <cstring>
-#include <cstdint>
-#include <cassert>
+#include "internal.h"
+#include "runtime.h"
 #include "console.h"
 
 template<int N>
@@ -23,7 +22,6 @@ struct StrBuf {
 
     template<int M>
     StrBuf(const StrBuf<M>& o) : len(0) {
-        assert(o.len < N && "StrBuf truncation detected in constructor");
         while (len < N - 1 && len < o.len) { data[len] = o.data[len]; ++len; }
         data[len] = '\0';
     }
@@ -31,7 +29,6 @@ struct StrBuf {
     StrBuf& operator=(const char* s) {
         len = 0;
         if (s) {
-            assert(strlen(s) < N && "StrBuf truncation detected in operator=");
             while (len < N - 1 && s[len]) { data[len] = s[len]; ++len; }
         }
         data[len] = '\0';
@@ -40,7 +37,6 @@ struct StrBuf {
 
     template<int M>
     StrBuf& operator=(const StrBuf<M>& o) {
-        assert(o.len < N && "StrBuf truncation detected in operator=");
         len = 0;
         while (len < N - 1 && len < o.len) { data[len] = o.data[len]; ++len; }
         data[len] = '\0';
@@ -64,6 +60,8 @@ struct StrBuf {
     bool operator==(const char* s)    const { return s && strcmp(data, s) == 0; }
     bool operator!=(const char* s)    const { return !(*this == s); }
 
+    bool equalsIgnoreCase(const char* s) const { return s && rt_stricmp(data, s) == 0; }
+
     template<int M>
     bool operator==(const StrBuf<M>& o) const {
         return len == o.len && memcmp(data, o.data, (size_t)len) == 0;
@@ -72,14 +70,12 @@ struct StrBuf {
     bool operator!=(const StrBuf<M>& o) const { return !(*this == o); }
 
     StrBuf& operator+=(char c) {
-        assert(len < N - 1 && "StrBuf overflow in operator+=(char)");
         if (len < N - 1) { data[len++] = c; data[len] = '\0'; }
         return *this;
     }
 
     StrBuf& operator+=(const char* s) {
         if (s) {
-            assert(len + strlen(s) < N && "StrBuf overflow in operator+=(const char*)");
             while (*s && len < N - 1) data[len++] = *s++;
         }
         data[len] = '\0';
@@ -89,9 +85,33 @@ struct StrBuf {
     template<int M>
     StrBuf& operator+=(const StrBuf<M>& o) { return *this += o.data; }
 
+    bool startsWith(const char* s) const { return s && strncmp(data, s, strlen(s)) == 0; }
+    bool endsWith  (const char* s) const {
+        if (!s) return false;
+        int sl = (int)strlen(s); return len >= sl && strcmp(data + len - sl, s) == 0;
+    }
+
+    void toLower() {
+        for (int i = 0; i < len; ++i) data[i] = (char)rt_tolower((unsigned char)data[i]);
+    }
+    void toUpper() {
+        for (int i = 0; i < len; ++i) data[i] = (char)rt_toupper((unsigned char)data[i]);
+    }
+
+    void trim() {
+        if (len == 0) return;
+        int start = 0, end = len;
+        while (start < end && rt_isspace((unsigned char)data[start])) start++;
+        while (end > start && rt_isspace((unsigned char)data[end - 1])) end--;
+        if (start > 0 || end < len) {
+            len = end - start;
+            memmove(data, data + start, (size_t)len);
+            data[len] = '\0';
+        }
+    }
+
     void insert(int pos, int count, char ch) {
         if (pos < 0 || pos > len || count <= 0) return;
-        assert(len + count < N && "StrBuf overflow in insert()");
         int space = N - 1 - len;
         int actual = (count < space) ? count : space;
         if (actual <= 0) return;
@@ -106,6 +126,16 @@ struct StrBuf {
         memmove(data + pos, data + pos + actual, (size_t)(len - pos - actual + 1));
         len -= actual;
     }
+
+    static StrBuf format(const char* fmt, ...) {
+        StrBuf res;
+        va_list ap; va_start(ap, fmt);
+        int r = rt_vsnprintf(res.data, N, fmt, ap);
+        va_end(ap);
+        res.len = (r < 0 || r >= N) ? N - 1 : r;
+        res.data[res.len] = '\0';
+        return res;
+    }
 };
 
 template<typename T>
@@ -114,9 +144,7 @@ struct OwnedArr {
     size_t cap  = 0;
 
     OwnedArr() = default;
-
     explicit OwnedArr(size_t n) : p(new T[n]()), cap(n) {}
-
     ~OwnedArr() { delete[] p; }
 
     OwnedArr(OwnedArr&& o) noexcept : p(o.p), cap(o.cap) { o.p = nullptr; o.cap = 0; }
@@ -146,7 +174,6 @@ struct OwnedSingle {
 
     OwnedSingle() = default;
     explicit OwnedSingle(T* ptr) : p(ptr) {}
-
     ~OwnedSingle() { delete p; }
 
     OwnedSingle(OwnedSingle&& o) noexcept : p(o.p) { o.p = nullptr; }
@@ -181,4 +208,4 @@ struct MsgCallback {
     explicit operator bool() const { return fn != nullptr; }
 };
 
-#endif
+#endif // STR_H
