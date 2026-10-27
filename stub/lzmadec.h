@@ -38,8 +38,8 @@
 #define Test86MSByte(b) ((b) == 0 || (b) == 0xFF)
 
 static inline void x86_decode(uint8_t *buffer, size_t size) {
-	static const uint8_t kMaskToAllowedStatus[8] = {1, 1, 1, 0, 1, 0, 0, 0};
-	static const uint8_t kMaskToBitNumber[8]     = {0, 1, 2, 2, 3, 3, 3, 3};
+	__attribute__((section(".text"))) static const uint8_t kMaskToAllowedStatus[8] = {1, 1, 1, 0, 1, 0, 0, 0};
+	__attribute__((section(".text"))) static const uint8_t kMaskToBitNumber[8]     = {0, 1, 2, 2, 3, 3, 3, 3};
 	size_t bufferPos = 0, prevPosT;
 	uint32_t prevMask = 0;
 	if (size < 5) return;

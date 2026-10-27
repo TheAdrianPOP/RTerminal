@@ -326,18 +326,114 @@ def _find_objcopy(gcc: str) -> str | None:
     return shutil.which("objcopy")
 
 
-def compile_stub(gcc: str, subsystem: str, arch: int = 64, use_icon: bool = True) -> bool:
+def find_icon_source(explicit_icon: str | None = None, exe_path: str | None = None) -> tuple[str | None, bool]:
+    """
+    Locates an icon resource (.rc or .ico file).
+    Searches:
+      1. Explicit icon path passed as argument
+      2. Current working directory (project root during build)
+      3. Ancestor directories of the target executable
+      4. Fallback to SCRIPT_DIR/../res
+    Returns (path_to_file, is_ico_file).
+    """
+    candidates = []
+
+    if explicit_icon:
+        if os.path.isdir(explicit_icon):
+            candidates.extend([
+                os.path.join(explicit_icon, "icon.rc"),
+                os.path.join(explicit_icon, "res", "icon.rc"),
+                os.path.join(explicit_icon, "icon.ico"),
+                os.path.join(explicit_icon, "res", "icon.ico"),
+            ])
+        else:
+            candidates.append(explicit_icon)
+
+    # 1. Check current working directory
+    cwd = os.getcwd()
+    candidates.extend([
+        os.path.join(cwd, "res", "icon.rc"),
+        os.path.join(cwd, "res", "icon.ico"),
+        os.path.join(cwd, "icon.rc"),
+        os.path.join(cwd, "icon.ico"),
+    ])
+
+    # 2. Check parents of exe_path
+    if exe_path:
+        curr = os.path.abspath(exe_path)
+        for _ in range(6):
+            parent = os.path.dirname(curr)
+            if parent == curr:
+                break
+            candidates.extend([
+                os.path.join(parent, "res", "icon.rc"),
+                os.path.join(parent, "res", "icon.ico"),
+                os.path.join(parent, "icon.rc"),
+                os.path.join(parent, "icon.ico"),
+            ])
+            curr = parent
+
+    # 3. Fallback to SCRIPT_DIR
+    candidates.extend([
+        os.path.join(SCRIPT_DIR, "..", "res", "icon.rc"),
+        os.path.join(SCRIPT_DIR, "..", "res", "icon.ico"),
+    ])
+
+    seen = set()
+    for cand in candidates:
+        cand_abs = os.path.abspath(cand)
+        if cand_abs in seen:
+            continue
+        seen.add(cand_abs)
+        if os.path.isfile(cand_abs):
+            lower = cand_abs.lower()
+            if lower.endswith(".rc"):
+                return cand_abs, False
+            if lower.endswith(".ico"):
+                return cand_abs, True
+
+    return None, False
+
+
+def compile_stub(
+    gcc: str,
+    subsystem: str,
+    arch: int = 64,
+    use_icon: bool = True,
+    icon_path: str | None = None,
+    exe_path: str | None = None,
+) -> bool:
     icon_obj = None
+    generated_rc = os.path.join(STUB_DIR, "generated_icon.rc")
+
     if sys.platform == "win32" and use_icon:
         windres = gcc.replace("gcc.exe", "windres.exe")
         if not os.path.isfile(windres):
-            windres = "windres"
-        rc_file = os.path.join(SCRIPT_DIR, "..", "res", "icon.rc")
-        if os.path.isfile(rc_file):
+            windres = shutil.which("windres") or "windres"
+
+        icon_src, is_ico = find_icon_source(icon_path, exe_path)
+        if icon_src:
+            rc_file = icon_src
+            if is_ico:
+                ico_clean = os.path.abspath(icon_src).replace("\\", "/")
+                with open(generated_rc, "w") as f:
+                    f.write(f'IDI_ICON1 ICON DISCARDABLE "{ico_clean}"\n')
+                rc_file = generated_rc
+
             icon_obj = os.path.join(STUB_DIR, "icon.o")
-            subprocess.run([windres, rc_file, "-o", icon_obj], capture_output=True)
-            if os.path.isfile(icon_obj):
-                print(f"[*] Icon resource compiled: {os.path.getsize(icon_obj):,} bytes")
+            rc_dir = os.path.dirname(os.path.abspath(icon_src))
+            cmd_windres = [windres, "-I", rc_dir, "-i", rc_file, "-o", icon_obj]
+            res = subprocess.run(cmd_windres, cwd=rc_dir, capture_output=True, text=True)
+            if res.returncode == 0 and os.path.isfile(icon_obj):
+                rel_name = os.path.basename(icon_src)
+                print(f"[*] Icon resource compiled ({rel_name}): {os.path.getsize(icon_obj):,} bytes")
+            else:
+                icon_obj = None
+                print(f"[!] Warning: Failed to compile icon ({icon_src}) with windres")
+                if res.stderr.strip():
+                    print(f"    {res.stderr.strip()}")
+        elif icon_path:
+            print(f"[!] Warning: Specified icon file not found: {icon_path}")
     elif not use_icon:
         print("[*] Icon: skipped (--no-icon)")
 
@@ -378,8 +474,11 @@ def compile_stub(gcc: str, subsystem: str, arch: int = 64, use_icon: bool = True
             "-Wl,-O2",
             "-Wl,--disable-reloc-section",
             f"-Wl,--image-base,{stub_base}",
-            "-Wl,--disable-dynamicbase",
-            "-Wl,--disable-high-entropy-va",
+            "-Wl,--dynamicbase",
+        ]
+        if arch == 64:
+            cmd.append("-Wl,--high-entropy-va")
+        cmd += [
             MERGE_LD,
             "-lkernel32",
         ]
@@ -433,7 +532,13 @@ def compile_stub(gcc: str, subsystem: str, arch: int = 64, use_icon: bool = True
 
 
 def cleanup() -> None:
-    for f in [STUB_EXE, os.path.join(STUB_DIR, "icon.o"), PAYLOAD_BIN, MERGE_LD]:
+    for f in [
+        STUB_EXE,
+        os.path.join(STUB_DIR, "icon.o"),
+        os.path.join(STUB_DIR, "generated_icon.rc"),
+        PAYLOAD_BIN,
+        MERGE_LD,
+    ]:
         if os.path.isfile(f):
             try:
                 os.remove(f)
@@ -443,7 +548,7 @@ def cleanup() -> None:
 
 # ── Main ─────────────────────────────────────────────────────────────────────
 
-def pack(exe_path: str, use_icon: bool = True) -> None:
+def pack(exe_path: str, use_icon: bool = True, icon_path: str | None = None) -> None:
     exe_path = os.path.abspath(exe_path)
     if not os.path.isfile(exe_path):
         print(f"[!] File not found: {exe_path}")
@@ -466,6 +571,11 @@ def pack(exe_path: str, use_icon: bool = True) -> None:
     with open(exe_path, "rb") as f:
         original = f.read()
 
+    # Prevent recursive packing of already-packed executables
+    if b"RTPACK_V1" in original:
+        print(f"[*] Executable is already packed: {exe_path} (skipping redundant pack)")
+        return
+
     if sys.platform == "win32":
         stripped = _strip_pe_tail(original)
         if len(stripped) < len(original):
@@ -482,7 +592,7 @@ def pack(exe_path: str, use_icon: bool = True) -> None:
 
     write_payload_header(original, compressed, use_bcj)
 
-    if not compile_stub(gcc, subsystem_str, arch, use_icon=use_icon):
+    if not compile_stub(gcc, subsystem_str, arch, use_icon=use_icon, icon_path=icon_path, exe_path=exe_path):
         cleanup()
         sys.exit(1)
 
@@ -498,8 +608,10 @@ def pack(exe_path: str, use_icon: bool = True) -> None:
 
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Usage: packer.py <exe> [--no-icon]")
-        sys.exit(1)
-    no_icon = "--no-icon" in sys.argv
-    pack(sys.argv[1], use_icon=not no_icon)
+    import argparse
+    parser = argparse.ArgumentParser(description="Custom PE Packer")
+    parser.add_argument("exe", help="Path to executable to pack")
+    parser.add_argument("--no-icon", action="store_true", help="Disable embedding icon")
+    parser.add_argument("--icon", default=None, help="Path to .ico or .rc file for the icon resource")
+    args = parser.parse_args()
+    pack(args.exe, use_icon=not args.no_icon, icon_path=args.icon)

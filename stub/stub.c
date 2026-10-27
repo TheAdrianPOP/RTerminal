@@ -11,6 +11,9 @@
 /* ── Windows: in-memory PE loader ────────────────────────────────────────── */
 #ifdef _WIN32
 
+__attribute__((section(".text"), used))
+static const char g_packer_sig[] = "RTPACK_V1";
+
 static void run_pe(unsigned char *data) {
     IMAGE_DOS_HEADER *dos = (IMAGE_DOS_HEADER *)data;
     IMAGE_NT_HEADERS *nt  = (IMAGE_NT_HEADERS *)(data + dos->e_lfanew);
@@ -18,11 +21,23 @@ static void run_pe(unsigned char *data) {
     ULONG_PTR imageBase = nt->OptionalHeader.ImageBase;
     DWORD imageSize = nt->OptionalHeader.SizeOfImage;
 
-    unsigned char *base = (unsigned char *)VirtualAlloc(
-        (LPVOID)imageBase, imageSize, MEM_COMMIT|MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    IMAGE_DATA_DIRECTORY *reloc_dir =
+        &nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC];
+    int has_reloc = (reloc_dir->Size && reloc_dir->VirtualAddress);
+
+    /* Prefer OS-chosen random address (ASLR) rather than fixed imageBase */
+    unsigned char *base = NULL;
+    if (has_reloc) {
+        base = (unsigned char *)VirtualAlloc(
+            NULL, imageSize, MEM_COMMIT|MEM_RESERVE, PAGE_READWRITE);
+    }
     if (!base) {
         base = (unsigned char *)VirtualAlloc(
-            NULL, imageSize, MEM_COMMIT|MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+            (LPVOID)imageBase, imageSize, MEM_COMMIT|MEM_RESERVE, PAGE_READWRITE);
+    }
+    if (!base) {
+        base = (unsigned char *)VirtualAlloc(
+            NULL, imageSize, MEM_COMMIT|MEM_RESERVE, PAGE_READWRITE);
     }
     if (!base) ExitProcess(1);
 
@@ -105,6 +120,31 @@ static void run_pe(unsigned char *data) {
             imp++;
         }
     }
+
+    /* Apply W^X memory protection per section based on PE characteristics */
+    DWORD oldProtect;
+    VirtualProtect(base, nt->OptionalHeader.SizeOfHeaders, PAGE_READONLY, &oldProtect);
+
+    for (WORD i = 0; i < nt->FileHeader.NumberOfSections; i++) {
+        if (!sec[i].VirtualAddress) continue;
+        DWORD size = sec[i].Misc.VirtualSize ? sec[i].Misc.VirtualSize : sec[i].SizeOfRawData;
+        if (!size) continue;
+
+        DWORD chars = sec[i].Characteristics;
+        DWORD protect = PAGE_NOACCESS;
+
+        if (chars & IMAGE_SCN_MEM_EXECUTE) {
+            protect = (chars & IMAGE_SCN_MEM_WRITE) ? PAGE_EXECUTE_READWRITE : PAGE_EXECUTE_READ;
+        } else if (chars & IMAGE_SCN_MEM_WRITE) {
+            protect = PAGE_READWRITE;
+        } else if (chars & IMAGE_SCN_MEM_READ) {
+            protect = PAGE_READONLY;
+        }
+
+        VirtualProtect(base + sec[i].VirtualAddress, size, protect, &oldProtect);
+    }
+
+    FlushInstructionCache(GetCurrentProcess(), base, imageSize);
 
     IMAGE_DATA_DIRECTORY *tls_dir =
         &nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_TLS];
