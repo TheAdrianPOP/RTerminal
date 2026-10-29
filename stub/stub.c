@@ -144,7 +144,9 @@ static void run_pe(unsigned char *data) {
         VirtualProtect(base + sec[i].VirtualAddress, size, protect, &oldProtect);
     }
 
-    FlushInstructionCache(GetCurrentProcess(), base, imageSize);
+    // GetCurrentProcess() is documented to always return the constant
+    // pseudo-handle (HANDLE)-1 -- using it directly avoids the import.
+    FlushInstructionCache((HANDLE)(LONG_PTR)-1, base, imageSize);
 
     IMAGE_DATA_DIRECTORY *tls_dir =
         &nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_TLS];
