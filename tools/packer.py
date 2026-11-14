@@ -474,7 +474,7 @@ def compile_stub(
             "-Wl,-O2",
             "-Wl,--disable-reloc-section",
             f"-Wl,--image-base,{stub_base}",
-            "-Wl,--dynamicbase",
+            "-Wl,--disable-reloc-section",
         ]
         if arch == 64:
             cmd.append("-Wl,--high-entropy-va")
